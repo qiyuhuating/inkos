@@ -1,9 +1,7 @@
-import { readFile } from "node:fs/promises";
 import { basename, extname, relative } from "node:path";
-import { extractText, getDocumentProxy } from "unpdf";
+import { decodeDocumentText, extractPdfDocument, readLimitedDocument } from "../utils/document-input.js";
 import { safeChildPath } from "../utils/path-safety.js";
 import { toPosixPath } from "../utils/posix-path.js";
-import { extractEpub } from "./epub.js";
 import { normalizeTranslationText, splitTranslationChapters, type TranslationTextChapter } from "./text.js";
 import type { CreateTranslationProjectInput, TranslationSourceKind } from "./types.js";
 
@@ -30,17 +28,13 @@ export async function extractTranslationSource(
   }
   if (!input.filePath) throw Object.assign(new Error("Provide sourceText or filePath"), { code: "TRANSLATION_SOURCE_REQUIRED" });
   const safePath = safeChildPath(projectRoot, input.filePath);
-  const buffer = await readFile(safePath);
-  if (buffer.byteLength > MAX_INPUT_BYTES) {
-    throw new Error(`Translation input is too large (${buffer.byteLength} bytes).`);
-  }
+  const buffer = await readLimitedDocument(safePath, MAX_INPUT_BYTES);
   const sourcePath = toPosixPath(relative(projectRoot, safePath));
   const filename = basename(safePath);
   const ext = extname(filename).toLowerCase();
 
   if (ext === ".pdf") {
-    const pdf = await getDocumentProxy(new Uint8Array(buffer));
-    const extracted = await extractText(pdf, { mergePages: true });
+    const extracted = await extractPdfDocument(buffer);
     const text = normalizeTranslationText(extracted.text);
     if (!text) throw new Error("PDF text extraction returned no text. Scanned PDFs require OCR and are not supported yet.");
     return {
@@ -54,6 +48,7 @@ export async function extractTranslationSource(
   }
 
   if (ext === ".epub") {
+    const { extractEpub } = await import("./epub.js");
     const epub = await extractEpub(buffer);
     const chapters = epub.chapters.map((chapter) => ({
       title: chapter.title,
@@ -69,7 +64,7 @@ export async function extractTranslationSource(
   }
 
   if (isTextExt(ext)) {
-    const text = normalizeTranslationText(buffer.toString("utf-8"));
+    const text = normalizeTranslationText(decodeDocumentText(buffer));
     return {
       title: input.title?.trim() || titleFromFilename(filename),
       kind: ext === ".md" || ext === ".markdown" ? "markdown" : "text",

@@ -16,7 +16,7 @@ import { changedSourceRegion, measureSourceText, splitSourceLines } from "../../
 import {textRangeEditContract,textScopedSelectionEditContract,TextEditSelectionSchema,TextEditRangeSchema,type TextEditRange} from '../../utils/text-range-edits.js';
 import { readArtifactRevision } from "../artifact-reader.js";
 import { currentExecutionBaselineWork, currentExecutionAuthorRequest, updateExecutionWork, recordExecutionEvidence } from "../execution-evidence.js";
-import {inspectFilmGraph} from './film-delivery.js';
+import type {inspectFilmGraph} from './film-delivery.js';
 import {StoryGraphSchema} from '../../interactive-film/graph-schema.js';
 import {FilmRequirementsSchema,type FilmRequirements} from '../../interactive-film/delivery-requirements.js';
 import {Value} from '@sinclair/typebox/value';
@@ -221,6 +221,7 @@ export function createArtifactMethodTools(pipeline: PipelineRunner, root: string
         if(profile.capabilityIds.includes('interactive-film')&&revision.path==='source/story-graph.json'){
           const requirementId=[...paths].find(([,path])=>path==='source/delivery-requirements.json')?.[0];
           const requirements=requirementId?Value.Parse(FilmRequirementsSchema,JSON.parse(sources.get(requirementId)!)) as FilmRequirements:undefined;
+          const { inspectFilmGraph } = await import('./film-delivery.js');
           structure={revisionId:revision.id,targetHash:revision.checksum,...inspectFilmGraph(StoryGraphSchema.parse(JSON.parse(content)),requirements)};
         }
         const review = await worker.review(sources, params.instruction, profile.qualityCriteria, paths, versions, comparison, structure);

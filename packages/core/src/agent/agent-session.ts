@@ -16,25 +16,16 @@ import type {
   ToolResultMessage,
 } from "@mariozechner/pi-ai";
 import type { PipelineRunner } from "../pipeline/runner.js";
-import {
-  CreativeEpisodeStore,
-  CreativeHarnessRuntime,
-  buildHarnessSystemPrompt,
-  confirmedCapabilityBinding,
-  createBuiltInWorkProfileRegistry,
-  createCapabilityPiTools,
-  capabilityActionId,
-  capabilityToolName,
-  createHarnessContextTransform,
-  resolveSessionHarnessBinding,
-  createProductionCapabilityRegistry,
-  loadWorkManifest,
-  type HarnessEpisodeHandle,
-  type WorkManifest,
-  type WorkProfile,
-  type ActionResult,
-  renderActionResultForAgent,
-} from "../harness/index.js";
+import { CreativeEpisodeStore } from "../harness/episode-store.js";
+import { CreativeHarnessRuntime, type HarnessEpisodeHandle } from "../harness/runtime.js";
+import { buildHarnessSystemPrompt } from "../harness/system-prompt.js";
+import { confirmedCapabilityBinding, buildProductionCapabilityRegistry } from "../harness/production-registry.js";
+import { createBuiltInWorkProfileRegistry } from "../harness/builtin-profiles.js";
+import { createCapabilityPiTools, capabilityActionId, capabilityToolName, renderActionResultForAgent } from "../harness/pi-tools.js";
+import { createHarnessContextTransform } from "../harness/agent-context.js";
+import { resolveSessionHarnessBinding } from "../harness/session-binding.js";
+import { loadWorkManifest } from "../harness/work-store.js";
+import type { WorkManifest, WorkProfile, ActionResult } from "../harness/contracts.js";
 import {
   appendTranscriptEvents,
   readTranscriptEvents,
@@ -59,7 +50,6 @@ import {
   resolveWorkSkillActivations,
 } from "../skills/index.js";
 import { assertSafeBookId } from "../utils/book-id.js";
-import { PlayStore } from "../play/play-store.js";
 import {
   assistantInvokesSkill,
   createUseSkillTool,
@@ -859,7 +849,7 @@ async function runAgentSessionUnlocked(
   const skillResolutionKey=skillResolutionCacheKey(effectiveSkillResolution)+JSON.stringify(profile);
   const playWorldId = profile.capabilityIds.includes("interactive-world") ? (workId ?? sessionId) : null;
   const playWorldExists = playWorldId
-    ? Boolean(await new PlayStore(projectRoot).loadWorld(playWorldId))
+    ? Boolean(await new (await import("../play/play-store.js")).PlayStore(projectRoot).loadWorld(playWorldId))
     : false;
   const cacheKey = agentCacheKey(projectRoot, sessionId);
 
@@ -945,7 +935,9 @@ async function runAgentSessionUnlocked(
           onActivate: (activation) => turnSkills.set(activation.skill.id, activation),
         })
       : undefined;
-    const capabilities = createProductionCapabilityRegistry({
+    const filmAuthoring = profileId === "interactive-film" && work !== null
+      ? await import("./film-authoring-tools.js") : undefined;
+    const capabilities = buildProductionCapabilityRegistry({
       confirmedCreation: isHostConfirmedAction(actionSource, requestedIntent),
       pipeline,
       projectRoot,
@@ -978,7 +970,7 @@ async function runAgentSessionUnlocked(
         return skill ? [{ skill, resources: [] }] : [];
       }),
       interactiveFilmAuthoring: profileId === "interactive-film" && work !== null,
-    });
+    }, filmAuthoring);
     const episodeStore = new CreativeEpisodeStore(join(projectRoot, ".inkos", "harness.sqlite"));
     const harnessRuntime = new CreativeHarnessRuntime(projectRoot, capabilities, profiles, episodeStore);
     const confirmedCapabilityAction = isHostConfirmedAction(actionSource, requestedIntent) && requestedIntent

@@ -11,18 +11,18 @@ import { assertSafeBookId, deriveBookIdFromTitle } from "../utils/book-id.js";
 import { safeChildPath } from "../utils/path-safety.js";
 import { readArtifactRevision } from "../harness/artifact-reader.js";
 import { currentExecutionAuthorRequest } from "../harness/execution-evidence.js";
-import { createPlayPresentation } from "../play/play-presentation.js";
+
 import { toPosixPath } from "../utils/posix-path.js";
 import {
   type Platform,
   type BookConfig,
   type FanficMode,
 } from "../models/book.js";
-import { generateShortFictionCover, runShortFictionProduction, reviseShortFictionProduction } from "../pipeline/short-fiction-runner.js";
-import { runInteractiveFilmCreation, runScriptCreation, runStoryboardCreation } from "../pipeline/script-storyboard-runner.js";
+
+
 import {FilmRequirementsSchema}from'../interactive-film/delivery-requirements.js';
-import { runResearchReport } from "../agents/researcher.js";
-import { ingestMaterial } from "../materials/ingest.js";
+
+
 import { retrieveMaterials } from "../materials/retrieve.js";
 import { estimateTextTokens } from "../llm/provider.js";
 import {
@@ -34,9 +34,9 @@ import {loadChapterSource,loadChapterArtifactSource} from "./chapter-import-sour
 import { splitChapters } from "../utils/chapter-splitter.js";
 import { measureJsonStructure, measureSourceText, numberSourceLines, splitSourceLines } from "../utils/source-text.js";
 import type { ScriptTargetFormat } from "../agents/script-storyboard.js";
-import { createPlayDB, type PlayGraphDB } from "../play/play-db-factory.js";
-import { PlayRunner, type PlayOpeningSeedResult, type PlayReplayResult, type PlayStepResult, type PlayVariantRestoreResult } from "../play/play-runner.js";
-import { PlayStore } from "../play/play-store.js";
+import type { PlayGraphDB } from "../play/play-db-factory.js";
+import type { PlayOpeningSeedResult, PlayReplayResult, PlayStepResult, PlayVariantRestoreResult } from "../play/play-runner.js";
+import type { PlayStore } from "../play/play-store.js";
 import type { AgentContext } from "../agents/base.js";
 import {
   ActionPayloadSchema,
@@ -779,6 +779,7 @@ export function createResearchWebTool(projectRoot: string): AgentTool<typeof Res
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<unknown>> {
+      const { runResearchReport } = await import("../agents/researcher.js");
       onUpdate?.(textResult(`Researching: ${params.topic}`));
       const searchConfig = await readResearchSearchConfig(projectRoot);
       const searchOptions = searchConfig.enabled
@@ -867,6 +868,7 @@ export function createIngestMaterialTool(projectRoot: string): AgentTool<typeof 
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<unknown>> {
+      const { ingestMaterial } = await import("../materials/ingest.js");
       onUpdate?.(textResult(params.sourceKind === "url"
         ? `Extracting URL: ${params.url ?? "(missing)"}`
         : `Extracting file: ${params.filePath ?? params.filename ?? "(missing)"}`));
@@ -1739,6 +1741,7 @@ export function createShortFictionRunTool(
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<unknown>> {
+      const { runShortFictionProduction } = await import("../pipeline/short-fiction-runner.js");
       const progress = (message: string) => onUpdate?.(textResult(message));
       const shortPayload = options.actionPayload?.shortRun;
       const requestedStoryId = shortPayload?.storyId ?? params.storyId;
@@ -1831,6 +1834,7 @@ export function createShortFictionReviseTool(pipeline:PipelineRunner,projectRoot
     description:"Revise an existing complete short-fiction Work from its persisted review and user direction, then review and update its sales package.",
     parameters:ShortRevisionParams,
     async execute(_id:string,params:Static<typeof ShortRevisionParams>,signal?:AbortSignal,onUpdate?:AgentToolUpdateCallback) {
+      const { reviseShortFictionProduction } = await import("../pipeline/short-fiction-runner.js");
       const skills=resolveProductionToolSkills(options);
       const result=await runPipelineWithAgentContext(pipeline,signal,skills,()=>reviseShortFictionProduction({
         projectRoot,storyId:workId,direction:params.instruction ?? "",resumeOperationId:params.resumeOperationId,restartPendingRevision:params.restartPendingRevision,chapterCount:params.chapterCount,charsPerChapter:params.charsPerChapter,maxChapterLength:params.maxChapterLength,revisionChapterNumbers:params.chapterNumbers,cover:false,signal,
@@ -1896,6 +1900,7 @@ export function createScriptCreationTool(
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<unknown>> {
+      const { runScriptCreation } = await import("../pipeline/script-storyboard-runner.js");
       const progress = (message: string) => onUpdate?.(textResult(message));
       const payload = options.actionPayload?.scriptCreate;
       const activatedSkills = resolveProductionToolSkills(options);
@@ -1987,6 +1992,7 @@ export function createStoryboardCreationTool(
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<unknown>> {
+      const { runStoryboardCreation } = await import("../pipeline/script-storyboard-runner.js");
       const progress = (message: string) => onUpdate?.(textResult(message));
       const payload = options.actionPayload?.storyboardCreate;
       const activatedSkills = resolveProductionToolSkills(options);
@@ -2085,6 +2091,7 @@ export function createInteractiveFilmCreationTool(
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<unknown>> {
+      const { runInteractiveFilmCreation } = await import("../pipeline/script-storyboard-runner.js");
       const progress = (message: string) => onUpdate?.(textResult(message));
       const payload = options.actionPayload?.interactiveFilmCreate;
       const activatedSkills = resolveProductionToolSkills(options);
@@ -2175,6 +2182,7 @@ export function createGenerateCoverTool(
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<unknown>> {
+      const { generateShortFictionCover } = await import("../pipeline/short-fiction-runner.js");
       onUpdate?.(textResult("Generating cover image..."));
       const coverPayload = options.actionPayload?.generateCover;
       const result = await generateShortFictionCover({
@@ -2265,6 +2273,10 @@ export function createPlayStartTool(
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<unknown>> {
+      const { PlayStore } = await import("../play/play-store.js");
+      const { createPlayDB } = await import("../play/play-db-factory.js");
+      const { PlayRunner } = await import("../play/play-runner.js");
+      const { createPlayPresentation } = await import("../play/play-presentation.js");
       _signal?.throwIfAborted();
       onUpdate?.(textResult("Starting interactive world..."));
       if (!pipeline) {
@@ -2557,6 +2569,8 @@ export function createPlayEditTool(
       _toolCallId: string,
       params: PlayEditParamsType,
     ): Promise<AgentToolResult<unknown>> {
+      const { PlayStore } = await import("../play/play-store.js");
+      const { createPlayDB } = await import("../play/play-db-factory.js");
       const store = new PlayStore(projectRoot);
       const worldId = safePlayId(sessionId, sessionId);
       const runId = "main";
@@ -2678,6 +2692,9 @@ export function createPlayStepTool(
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<unknown>> {
+      const { PlayStore } = await import("../play/play-store.js");
+      const { createPlayDB } = await import("../play/play-db-factory.js");
+      const { PlayRunner } = await import("../play/play-runner.js");
       const input = (currentExecutionAuthorRequest() ?? params.input).trim();
       if (!input) throw new Error("Play input is empty.");
       const store = new PlayStore(projectRoot);
@@ -2768,6 +2785,9 @@ export function createPlayReviseTool(
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<unknown>> {
+      const { PlayStore } = await import("../play/play-store.js");
+      const { createPlayDB } = await import("../play/play-db-factory.js");
+      const { PlayRunner } = await import("../play/play-runner.js");
       const store = new PlayStore(projectRoot);
       const worldId = safePlayId(sessionId, sessionId);
       const runId = "main";

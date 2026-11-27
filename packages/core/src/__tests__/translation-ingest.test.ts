@@ -8,7 +8,7 @@ import { segmentTranslationText } from "../translation/text.js";
 import {loadWorkManifest} from "../harness/work-store.js";
 
 vi.mock("unpdf", () => ({
-  getDocumentProxy: vi.fn(async () => ({ fake: true })),
+  getDocumentProxy: vi.fn(async () => ({ destroy: vi.fn(async () => {}) })),
   extractText: vi.fn(async () => ({
     text: "# 第一章 雪线\n\nPDF 第一段。\n\nPDF 第二段。",
     totalPages: 2,

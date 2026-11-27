@@ -1,6 +1,5 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { EPub } from "epub-gen-memory";
 import {renderChapterDocument} from '../utils/chapter-document.js';
 import {readChapterHeading} from '../utils/chapter-splitter.js';
 
@@ -127,6 +126,7 @@ export async function buildExportArtifact(
       const { title, html } = markdownToSimpleHtml(markdown);
       epubChapters.push({ title, content: html });
     }
+    const { EPub } = await import("epub-gen-memory");
     const epubInstance = new EPub(
       { title: book.title, lang: book.language === "en" ? "en" : "zh-CN" },
       epubChapters,

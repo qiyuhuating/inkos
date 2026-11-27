@@ -15,12 +15,9 @@ Use this skill when the user says prose feels generic, mechanical, over-explaine
 
 Load `references/semantic-cleanup.md` for a passage-level diagnosis or revision brief.
 
-## Fiction prose constraints
+## Optional craft guidance
 
-- In narration, avoid empty stock phrases such as 命运的齿轮开始转动, 一切才刚刚开始, 仿佛整个世界都安静了下来, 时间仿佛在这一刻静止, and little did they know. Preserve meaningful quoted dialogue and citations.
-- Count contiguous em/en dashes as one punctuation event; keep at most two events per 1,000 non-whitespace characters of the chapter. Prefer a sentence break or a specific action.
-- Show emotions through the character's concrete choices, gestures, sensory evidence and consequences; keep direct interior thought when it adds otherwise inaccessible information.
-- Do not append an explanation, aphorism, recap, or moral to a paragraph whose action already conveys its meaning. End on a new fact, decision, consequence, or question grounded in the scene.
-- Distinguish speakers through vocabulary, syntax, registers, knowledge and individual habits from role cards. Do not force identical sentence rhythms.
-- Flag possible injury or possession contradictions against active state facts; do not silently rewrite canon or infer healing/acquisition/loss without narrative evidence.
-- For style-only repair, return only the flagged paragraphs with the smallest necessary changes. Preserve other paragraphs, plot facts, POV, and meaningful dialogue.
+- Preserve the author's explicit style, point of view, character voices and canon. Otherwise choose your own diction, rhythm, punctuation, imagery and narrative technique.
+- Diagnose stale wording, repetition, exposition and abstract emotion in context; any may be intentional. Do not impose a phrase blacklist, punctuation quota, or fixed paragraph ending unless the author requests it.
+- When style repair is requested, make the smallest effective changes, preserving facts and meaning outside the authorized scope.
+- Flag possible continuity conflicts for review; do not invent canon changes.

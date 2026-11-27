@@ -1,6 +1,5 @@
-import { readFile } from "node:fs/promises";
 import { basename, extname, join, relative } from "node:path";
-import { extractText, getDocumentProxy } from "unpdf";
+import { decodeDocumentText, extractPdfDocument, readLimitedDocument, readLimitedResponse } from "../utils/document-input.js";
 import { z } from "zod";
 import { safeChildPath } from "../utils/path-safety.js";
 import { toPosixPath } from "../utils/posix-path.js";
@@ -107,10 +106,7 @@ async function readMaterialSource(
   }
   if (!input.filePath) throw new Error("ingest_material.filePath is required for file sources.");
   const safePath = safeChildPath(projectRoot, input.filePath);
-  const buffer = await readFile(safePath);
-  if (buffer.byteLength > MAX_SOURCE_BYTES) {
-    throw new Error(`Material file is too large (${buffer.byteLength} bytes).`);
-  }
+  const buffer = await readLimitedDocument(safePath, MAX_SOURCE_BYTES);
   const filename = input.filename || basename(safePath);
   const mimeType = input.mimeType || mimeFromFilename(filename);
   return extractBufferMaterial(buffer, {
@@ -136,11 +132,7 @@ async function readUrlMaterial(url: string, fetchImpl: typeof fetch): Promise<Ma
     throw new Error(`Fetch failed: ${response.status} ${response.statusText}`);
   }
   const mimeType = response.headers.get("content-type")?.split(";")[0]?.trim() || mimeFromFilename(parsed.pathname);
-  const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-  if (buffer.byteLength > MAX_SOURCE_BYTES) {
-    throw new Error(`Fetched material is too large (${buffer.byteLength} bytes).`);
-  }
+  const buffer = await readLimitedResponse(response, MAX_SOURCE_BYTES);
   return extractBufferMaterial(buffer, {
     source: url,
     filename: basename(parsed.pathname) || parsed.hostname,
@@ -154,8 +146,7 @@ async function extractBufferMaterial(
 ): Promise<MaterialSource> {
   const mimeType = meta.mimeType || mimeFromFilename(meta.filename);
   if (isPdf(meta.filename, mimeType)) {
-    const pdf = await getDocumentProxy(new Uint8Array(buffer));
-    const extracted = await extractText(pdf, { mergePages: true });
+    const extracted = await extractPdfDocument(buffer);
     const text = normalizeText(extracted.text);
     if (!text) throw new Error("PDF text extraction returned no text. Scanned PDFs require OCR and are not supported yet.");
     return {
@@ -167,14 +158,14 @@ async function extractBufferMaterial(
       totalPages: extracted.totalPages,
     };
   }
-  const raw = buffer.toString("utf-8");
+  const raw = decodeDocumentText(buffer);
   if (isHtml(meta.filename, mimeType)) {
     return {
       kind: "webpage",
       source: meta.source,
       title: extractHtmlTitle(raw) || stripExtension(meta.filename),
       mimeType,
-      text: normalizeText(htmlToText(raw)),
+      text: normalizeText(decodeHtml(htmlToText(raw))),
     };
   }
   if (isTextLike(meta.filename, mimeType)) {
@@ -244,7 +235,9 @@ function htmlToText(html: string): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ");
+    .replace(/<\/?(?:p|h[1-6]|div|section|article|li|tr|blockquote)\b[^>]*>/gi, "\n\n")
+    .replace(/<br\b[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, "");
 }
 
 function extractHtmlTitle(html: string): string | undefined {
@@ -263,7 +256,7 @@ function decodeHtml(value: string): string {
 }
 
 function normalizeText(value: string): string {
-  return decodeHtml(value).replace(/\r\n/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return value.replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function stripExtension(filename: string): string {

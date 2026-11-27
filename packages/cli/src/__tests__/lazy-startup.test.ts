@@ -37,5 +37,8 @@ describe("lazy CLI startup", () => {
     expect(write.help).toContain("--count <n>");
     expect(write.urls.some(url => url.endsWith("/packages/core/dist/index.js"))).toBe(false);
     expect(write.urls.some(url => /\/packages\/core\/dist\/(?:play\/|interactive-film\/|pipeline\/(?:short-fiction-runner|script-storyboard-runner)\.js)/.test(url))).toBe(false);
+    const agent = run("agent", "--help");
+    expect(agent.help).toContain("Natural language agent mode");
+    expect(agent.urls.some(url => /\/packages\/core\/dist\/(?:play\/|agent\/film-authoring-tools\.js|interactive-film\/(?:export-html|export-ink|node-image)\.js|pipeline\/(?:short-fiction-runner|script-storyboard-runner)\.js)/.test(url))).toBe(false);
   });
 });

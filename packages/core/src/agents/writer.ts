@@ -166,7 +166,7 @@ export class WriterAgent extends BaseAgent {
     let content = creativeSubmission.content.trim();
     let repairUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     const styleIssues = lintChapterStyle(content);
-    if (styleIssues.length > 0) {
+    if (book.styleRepair === true && styleIssues.length > 0) {
       const { result, usage } = await this.submitStructured(
         [
           { role: "system", content: resolvedLanguage === "en"

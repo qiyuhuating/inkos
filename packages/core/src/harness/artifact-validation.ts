@@ -7,7 +7,7 @@ import { Value } from "@sinclair/typebox/value";
 import { countChapterLength, resolveLengthCountingMode } from "../utils/length-metrics.js";
 import { TranslationProjectManifestSchema, TranslationGlossarySchema, TranslationChapterFileSchema, validateTranslationManifestOwnership } from "../translation/types.js";
 import { StoryGraphSchema } from "../interactive-film/graph-schema.js";
-import { assertVariableTypes } from "../interactive-film/validation.js";
+import { assertVariableTypes } from "../interactive-film/variable-validation.js";
 import { assertGenericArtifactEditable } from './artifact-edit-policy.js';
 
 export class ArtifactValidationError extends Error {

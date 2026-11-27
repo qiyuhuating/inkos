@@ -2,7 +2,7 @@ import { loadWorkManifest } from "../work-store.js";
 import { Type } from "@sinclair/typebox";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import type { PipelineRunner } from "../../pipeline/runner.js";
-import { runShortFictionStage, type ShortProductionStage } from "../../pipeline/short-fiction-runner.js";
+import type { ShortProductionStage } from "../../pipeline/short-fiction-runner.js";
 import { readShortProductionState } from "../../pipeline/short-production-state.js";
 import { loadAvailableAgentSkills } from "../../skills/builtin-loader.js";
 import { resolveProfileSkillActivations } from "../../skills/activations.js";
@@ -27,6 +27,7 @@ export function createShortProductionStageTools(pipeline: PipelineRunner, root: 
     name, label: `Short fiction: ${stage}`, parameters: Parameters,
     description: `Execute only the ${stage} stage of a short-fiction Work. Earlier artifacts must exist. Return persisted results and execution observations.`,
     async execute(_id, params, signal, onUpdate) {
+      const { runShortFictionStage } = await import("../../pipeline/short-fiction-runner.js");
       if (activeWorkId && activeWorkId !== params.workId) throw new Error("Action must target the active Work");
       let profileId = "short-fiction";
       let language: "zh" | "en" = "zh";

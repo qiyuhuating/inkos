@@ -117,7 +117,13 @@ describe("guardedPiNonStreaming", () => {
         if(name==="submit_runtime_state_delta")settledPrompt=JSON.stringify(request.messages);
         return new Response(JSON.stringify({choices:[{finish_reason:"tool_calls",message:{tool_calls:[{id:name,type:"function",function:{name,arguments:JSON.stringify(args)}}]}}]}));
       });
-      const repaired=await new WriterAgent({client:boundedClient,model:model.id,projectRoot:root,bookId:"generic"}).writeChapter({book:JSON.parse(original),bookDir:join(root,"works/generic/source"),chapterNumber:1,chapterIntent:"Return the receipt",chapterMemo:{chapter:1,goal:"Return the receipt",body:"The owner accepts the sealed receipt.",threadRefs:[]},contextPackage:{chapter:1,selectedContext:[]}});
+      const writerInput={book:JSON.parse(original),bookDir:join(root,"works/generic/source"),chapterNumber:1,chapterIntent:"Return the receipt",chapterMemo:{chapter:1,goal:"Return the receipt",body:"The owner accepts the sealed receipt.",threadRefs:[]},contextPackage:{chapter:1,selectedContext:[]}};
+      const writer=new WriterAgent({client:boundedClient,model:model.id,projectRoot:root,bookId:"generic"});
+      const expressive=await writer.writeChapter(writerInput);
+      expect(expressive.content).toBe("Mara returns the sealed receipt.\n\nLittle did she know, the owner had been waiting.");
+      expect(calls).toEqual(["submit_chapter_draft","submit_runtime_state_delta"]);
+      calls.length=0;
+      const repaired=await writer.writeChapter({...writerInput,book:{...writerInput.book,styleRepair:true}});
       expect(repaired.content).toBe("Mara returns the sealed receipt.\n\nThe owner stood by the door, waiting.");
       expect(calls).toEqual(["submit_chapter_draft","submit_style_repairs","submit_runtime_state_delta"]);
       expect(settledPrompt).toContain("The owner stood by the door, waiting.");

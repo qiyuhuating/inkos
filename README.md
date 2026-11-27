@@ -717,6 +717,21 @@ CLI 使用精确 Core 子路径，不再通过根 barrel 导入运行时实现�
 node benchmarks/cli-startup-replay.mjs ../inkos ../inkos-v2
 ```
 
+### 通用 Agent 依赖隔离与创作自主性
+
+- 通用会话绕开 Harness 根 barrel，生产工具保留同步 schema/确认逻辑，具体 Play、短篇、剧本、分镜、影片、封面、研究、素材入库实现在相应工具执行时加载；影片专用 authoring 实现仅在绑定影片 Work 的会话加载。原同步能力注册入口保持兼容。
+- 默认不再强制统一表达语气、标点配额或段落结尾。内置及项目覆盖的长篇/去套话 Skill 以可选专业建议为主；用户明确的风格、事实、权限及交付约束仍有效。作品的 `works/<book-id>/source/book.json` 可设 `"styleRepair": true` 启用原规则驱动局部精修；省略或设为 false 时，确定性文风发现仅供审查参考，不自动重写。现阶段通过作品 JSON 配置，未增加 UI 开关。
+- 素材与翻译共用有界文件读取和 UTF-8/UTF-16 BOM 解码；素材 URL 使用有界流式读取并在超限取消。纯文本素材保留字面实体；HTML 提取保留段落。PDF 解析器按需加载并在完成后释放文档，EPUB 导入/导出依赖延迟加载。不新增 OCR、DOCX 或其他格式；非 UTF-8/带 BOM UTF-16 的文本需要先转码。
+
+基于 Node 24.16.0 的模块加载钩子，单次对照上一检查点 `e49b5d0c`：
+
+| 启动路径 | 上轮总模块 / Core 模块 | 本轮总模块 / Core 模块 |
+| --- | ---: | ---: |
+| `agent --help` | 931 / 250 | 707 / 219 |
+| `interact --help` | 931 / 250 | 707 / 219 |
+
+相关 Play/影片/短篇及分镜运行器路径数从 26 降至 7（包含新增的独立变量类型校验模块）。单次峰值 RSS 分别约 116.2 → 105.1 MiB、116.1 → 100.7 MiB；仅为初步观测，不视作长期内存基准。Core 定向 86 项测试及 CLI 全部 90 项测试通过。没有在线模型写作质量对照，也未改动 SDK 初始化、长会话缓存容量、超时策略或跨任务 SQLite 池。
+
 ## Star History
 
 <a href="https://www.star-history.com/#Narcooo/inkos&type=date&legend=top-left">

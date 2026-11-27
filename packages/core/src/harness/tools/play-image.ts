@@ -6,9 +6,6 @@ import { syncWorkSourceArtifacts } from '../source-sync.js';
 import type { ActionArtifactRef } from '../contracts.js';
 import { Type } from '@sinclair/typebox';
 import type { AgentTool } from '@mariozechner/pi-agent-core';
-import { PlayStore } from '../../play/play-store.js';
-import { createPlayDB } from '../../play/play-db-factory.js';
-import { buildPlayEntityImagePrompt,buildPlaySceneImagePrompt,playSceneImageKey,generatePlayImage,playImageContext } from '../../play/play-image.js';
 
 const Parameters=Type.Object({target:Type.Union([Type.Literal('entity'),Type.Literal('scene')]),
   entityId:Type.Optional(Type.String()),
@@ -17,6 +14,7 @@ export function createPlayImageTool(root:string,worldId:string,runId='main'):Age
   return {artifactsCommitted:true,managesWorkLock:true,name:'generate_play_image',label:'Generate Play Image',parameters:Parameters,
     description:'Generate or regenerate a scene illustration or entity portrait for the current world. Pass the requested visual changes in instruction. Preserve request and image versions; this does not advance a turn.',
     async execute(_id,params,signal){
+      const [{ PlayStore }, { createPlayDB }, { buildPlayEntityImagePrompt,buildPlaySceneImagePrompt,playSceneImageKey,generatePlayImage,playImageContext }] = await Promise.all([import('../../play/play-store.js'), import('../../play/play-db-factory.js'), import('../../play/play-image.js')]);
       const locked = <T>(task: () => Promise<T>) => runInWorkMutationQueue(`${root}\0${worldId}`, () => withWorkMutationScope(root,worldId,() => new StateManager(root).acquireBookLock(worldId),task));
       const {runDir,key,prompt}=await locked(async()=>{
       signal?.throwIfAborted();

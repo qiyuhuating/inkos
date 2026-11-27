@@ -2,14 +2,14 @@ import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Type } from '@sinclair/typebox';
 import type { AgentTool } from '@mariozechner/pi-agent-core';
-import { PlayStore } from '../../play/play-store.js';
-import { createPlayDB } from '../../play/play-db-factory.js';
 
 const Parameters=Type.Object({});
 export function createInspectPlayStateTool(root:string,worldId:string):AgentTool<typeof Parameters>{
   return {name:'inspect_play_state',label:'Inspect Play State',parameters:Parameters,
     description:'Read the current interactive world, exact entity IDs, current status, active relationships and state slots before editing. This does not advance a turn.',
     async execute(){
+      const { PlayStore } = await import('../../play/play-store.js');
+      const { createPlayDB } = await import('../../play/play-db-factory.js');
       const store=new PlayStore(root),world=await store.loadWorld(worldId);
       if(!world)throw Object.assign(new Error('Interactive world does not exist'),{code:'PLAY_WORLD_NOT_FOUND'});
       const runDir=store.runDir(worldId,'main');

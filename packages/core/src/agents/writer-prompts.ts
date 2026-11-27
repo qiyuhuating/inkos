@@ -18,6 +18,7 @@ export function buildWriterSystemPrompt(
     ? [
         `Write one chapter for the active ${book.genre} Work on ${book.platform} using the activated professional Skills.`,
         governedContract("en"),
+        "Choose your own narrative voice, rhythm, diction, imagery and structure wherever the author has not specified them. Treat craft advice as guidance, not a mandatory prose formula.",
         lengthContract(resolvedLength, "en"),
         narrativePersonContract(bookRules, "en"),
         protagonistContract(bookRules, "en"),
@@ -27,6 +28,7 @@ export function buildWriterSystemPrompt(
     : [
         `按已激活的专业 Skill 为当前${book.genre}作品写一章。平台：${book.platform}。`,
         governedContract("zh"),
+        "在作者未明确指定之处，自主选择叙事声音、节奏、措辞、意象和结构。专业写作建议是方法参考，不是统一文风模板。",
         lengthContract(resolvedLength, "zh"),
         narrativePersonContract(bookRules, "zh"),
         protagonistContract(bookRules, "zh"),

@@ -1,7 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { toPosixPath } from "../utils/posix-path.js";
-import { EPub } from "epub-gen-memory";
 import { loadTranslationChapter, loadTranslationManifest, translationProjectDir } from "./run-store.js";
 import type { TranslationExportFormat, TranslationExportResult } from "./types.js";
 import { syncWorkSourceArtifacts } from "../harness/source-sync.js";
@@ -32,6 +31,7 @@ export async function writeTranslationExport(
           .join("\n"),
       });
     }
+    const { EPub } = await import("epub-gen-memory");
     const epub = new EPub({ title: manifest.title, lang: manifest.targetLanguage }, chapters);
     await writeFile(outputPath, await epub.genEpub());
   } else {

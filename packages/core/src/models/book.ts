@@ -30,6 +30,7 @@ export const BookConfigSchema = z.object({
   minChapterLength: z.number().int().min(1).optional(),
   maxChapterLength: z.number().int().min(1).optional(),
   language: z.enum(["zh", "en"]),
+  styleRepair: z.boolean().optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   parentBookId: z.string().optional(),

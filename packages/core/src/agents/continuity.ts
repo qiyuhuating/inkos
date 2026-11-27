@@ -75,7 +75,7 @@ export class ContinuityAuditor extends BaseAgent {
     const deterministicFindings = lintChapterStyle(chapterContent);
     const userPrompt = JSON.stringify({ chapterNumber, comparison,
       ...(deterministicFindings.length ? { deterministicFindings: deterministicFindings.map(finding => ({ ...finding, paragraph: finding.paragraph + 1 })),
-        deterministicFindingInstruction: "Host flags are candidate issues, not a substitute for evidence. Cite exact chapter source lines and preserve intentional voice." } : {}),
+        deterministicFindingInstruction: "Host style flags are optional diagnostic cues, not defects by themselves. Only report a material problem in context; preserve intentional diction, rhythm, punctuation and voice. Cite exact chapter source lines." } : {}),
       sources: [...sources].map(([sourceId, content]) => ({ sourceId, numberedLines: numberReviewSource(content) })) });
 
     const { result, usage } = await this.submitSourcedReview(
