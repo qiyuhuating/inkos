@@ -36,6 +36,7 @@ export class LocalSearchIndex {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL");
+    this.db.exec("PRAGMA synchronous = NORMAL");
     this.db.exec("PRAGMA foreign_keys = ON");
     this.initializeSchema();
   }
@@ -71,6 +72,8 @@ export class LocalSearchIndex {
     try {
       for (const document of normalized) {
         if (existingHashes.get(document.id) === document.contentHash) continue;
+        const titleTokens = tokenizeSearchText(document.title).join(" ");
+        const bodyTokens = tokenizeSearchText(document.body).join(" ");
         upsert.run(
           document.id,
           document.scope,
@@ -78,8 +81,8 @@ export class LocalSearchIndex {
           document.source,
           document.title,
           document.body,
-          document.titleTokens,
-          document.bodyTokens,
+          titleTokens,
+          bodyTokens,
           document.metadataJson,
           document.contentHash,
         );
@@ -223,11 +226,12 @@ export function splitMarkdownForSearch(markdown: string): MarkdownSearchSegment[
   return segments;
 }
 
+const searchSegmenter = new Intl.Segmenter(undefined, { granularity: "word" });
+
 export function tokenizeSearchText(text: string): string[] {
   const normalized = text.normalize("NFKC").toLocaleLowerCase();
-  const segmenter = new Intl.Segmenter(undefined, { granularity: "word" });
   const tokens: string[] = [];
-  for (const part of segmenter.segment(normalized)) {
+  for (const part of searchSegmenter.segment(normalized)) {
     const token = part.segment.trim();
     if (!part.isWordLike || !token) continue;
     if (/^[\p{Script=Latin}\p{N}_-]+$/u.test(token) && token.length < 2) continue;
@@ -258,16 +262,12 @@ function buildMatchQuery(query: string): string {
 function normalizeDocument(document: SearchDocument, scope: string) {
   const normalized = { ...document, scope };
   const metadataJson = JSON.stringify(document.metadata ?? {});
-  const titleTokens = tokenizeSearchText(document.title).join(" ");
-  const bodyTokens = tokenizeSearchText(document.body).join(" ");
   const contentHash = createHash("sha256")
     .update([normalized.kind, normalized.source, normalized.title, normalized.body, metadataJson].join("\0"))
     .digest("hex");
   return {
     ...normalized,
     metadataJson,
-    titleTokens,
-    bodyTokens,
     contentHash,
   };
 }

@@ -11,7 +11,7 @@ import type { ChapterMeta } from "../models/chapter.js";
 import type { NotifyChannel, LLMConfig, AgentLLMOverride } from "../models/project.js";
 import { ArchitectAgent, type ArchitectOutput } from "../agents/architect.js";
 import { PlannerAgent, type PlanChapterOutput } from "../agents/planner.js";
-import { ComposerAgent, type ComposeChapterOutput } from "../agents/composer.js";
+import { ComposerAgent, contextBudgetFromClient, type ComposeChapterOutput } from "../agents/composer.js";
 import { WriterAgent, type WriteChapterInput, type WriteChapterOutput } from "../agents/writer.js";
 import { ContinuityAuditor } from "../agents/continuity.js";
 import { ReviserAgent, DEFAULT_REVISE_MODE, type ReviseMode } from "../agents/reviser.js";
@@ -356,41 +356,34 @@ export class PipelineRunner {
 
 
   private resolveOverride(agentName: string): { model: string; client: LLMClient } {
-    const override = this.config.modelOverrides?.[agentName];
-    if (!override) {
+    const configured = this.config.modelOverrides?.[agentName];
+    if (!configured) {
       return { model: this.config.model, client: this.config.client };
     }
-    if (typeof override === "string") {
-      return { model: override, client: this.config.client };
-    }
-    // Full override — needs its own client if baseUrl differs
-    if (!override.baseUrl) {
+    const override: AgentLLMOverride = typeof configured === "string" ? { model: configured } : configured;
+    const base = this.config.defaultLLMConfig;
+    const baseUrl = override.baseUrl ?? base?.baseUrl;
+    if (!baseUrl) {
       return { model: override.model, client: this.config.client };
     }
-    const base = this.config.defaultLLMConfig;
     const provider = override.provider ?? base?.provider ?? "custom";
-    const apiKeySource = override.apiKeyEnv
-      ? `env:${override.apiKeyEnv}`
-      : `base:${base?.apiKey ?? ""}`;
     const stream = override.stream ?? base?.stream ?? true;
     const apiFormat = base?.apiFormat ?? "chat";
-    const cacheKey = [
-      provider,
-      override.baseUrl,
-      apiKeySource,
-      `stream:${stream}`,
-      `format:${apiFormat}`,
-    ].join("|");
+    const sameEndpoint = baseUrl === base?.baseUrl && provider === base?.provider;
+    const cacheKey = JSON.stringify([
+      provider, baseUrl, override.model, override.apiKeyEnv ?? null, stream, apiFormat,
+    ]);
     let client = this.agentClients.get(cacheKey);
     if (!client) {
       const apiKey = override.apiKeyEnv
         ? process.env[override.apiKeyEnv] ?? ""
         : base?.apiKey ?? "";
       client = createLLMClient({
+        ...(sameEndpoint ? base : undefined),
         provider,
         service: base?.service ?? "custom",
         configSource: base?.configSource ?? "env",
-        baseUrl: override.baseUrl,
+        baseUrl,
         apiKey,
         model: override.model,
         temperature: base?.temperature ?? 0.7,
@@ -2144,6 +2137,7 @@ export class PipelineRunner {
       bookDir,
       chapterNumber,
       plan,
+      contextBudget: contextBudgetFromClient(this.resolveOverride("writer").client),
       referenceContextProvider: (request) => selectBookReferenceContext(
         this.config.projectRoot,
         book.id,

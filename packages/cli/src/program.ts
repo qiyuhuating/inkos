@@ -25,10 +25,9 @@ import { fanficCommand } from "./commands/fanfic.js";
 import { shortCommand } from "./commands/short-fiction.js";
 import { forecastCommand } from "./commands/forecast.js";
 import { translateCommand } from "./commands/translate.js";
-import { createStudioCommand, launchStudioEntry } from "./commands/studio.js";
+import { createStudioCommand } from "./commands/studio-command.js";
 import { createInteractCommand, type InteractCommandHooks } from "./commands/interact.js";
 import { createTuiCommand } from "./commands/tui.js";
-import { launchTui } from "./tui/app.js";
 import { workCommand } from "./commands/work.js";
 
 const require = createRequire(import.meta.url);
@@ -57,6 +56,7 @@ export function createProgram(hooks: ProgramHooks = {}): Command {
     .option("--stream", "Force streaming LLM responses for this CLI run")
     .option("--no-stream", "Force non-streaming LLM responses for this CLI run")
     .action(async () => {
+      const { launchStudioEntry } = await import("./commands/studio.js");
       await launchStudioEntry(process.cwd(), "4567", {
         launchStudio: hooks.launchStudio,
         recentProjectPath: hooks.studioRecentProjectPath,

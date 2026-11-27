@@ -105,6 +105,23 @@ describe("guardedPiNonStreaming", () => {
       const chapter=await new WriterAgent({client:boundedClient,model:model.id,projectRoot:root,bookId:"generic"}).writeChapter({book:JSON.parse(original),bookDir:join(root,"works/generic/source"),chapterNumber:1,chapterIntent:"Return the receipt",chapterMemo:{chapter:1,goal:"Return the receipt",body:"The owner accepts the sealed receipt.",threadRefs:[]},contextPackage:{chapter:1,selectedContext:[{source:"story/parent_canon.md",reason:"Original ownership",excerpt:canon,protection:"protected"}]}});
       expect(chapter.chapterNumber).toBe(1);
       expect(calls).toEqual(["submit_chapter_draft","submit_runtime_state_delta"]);
+      calls.length=0;
+      let settledPrompt="";
+      fetchWithProxyMock.mockImplementation(async(_url:string,init:RequestInit)=>{
+        const request=JSON.parse(String(init.body)),name=request.tools[0].function.name;calls.push(name);
+        const args=name==="submit_chapter_draft"
+          ? {title:"Return",content:"Mara returns the sealed receipt.\n\nLittle did she know, the owner had been waiting."}
+          : name==="submit_style_repairs"
+            ? {repairs:[{paragraph:1,replacement:"The owner stood by the door, waiting."}]}
+            : {postSettlement:"Receipt returned.",factOps:{upsert:[],expire:[]},hookOps:{upsert:[],mention:[],resolve:[],defer:[]},newHookCandidates:[],chapterSummary:{title:"Return",characters:"Mara",events:"Receipt returned",stateChanges:"",hookActivity:"",mood:"calm",chapterType:"resolution"}};
+        if(name==="submit_runtime_state_delta")settledPrompt=JSON.stringify(request.messages);
+        return new Response(JSON.stringify({choices:[{finish_reason:"tool_calls",message:{tool_calls:[{id:name,type:"function",function:{name,arguments:JSON.stringify(args)}}]}}]}));
+      });
+      const repaired=await new WriterAgent({client:boundedClient,model:model.id,projectRoot:root,bookId:"generic"}).writeChapter({book:JSON.parse(original),bookDir:join(root,"works/generic/source"),chapterNumber:1,chapterIntent:"Return the receipt",chapterMemo:{chapter:1,goal:"Return the receipt",body:"The owner accepts the sealed receipt.",threadRefs:[]},contextPackage:{chapter:1,selectedContext:[]}});
+      expect(repaired.content).toBe("Mara returns the sealed receipt.\n\nThe owner stood by the door, waiting.");
+      expect(calls).toEqual(["submit_chapter_draft","submit_style_repairs","submit_runtime_state_delta"]);
+      expect(settledPrompt).toContain("The owner stood by the door, waiting.");
+      expect(settledPrompt).not.toContain("Little did she know");
     }finally{evictAgentCache('initialization');await rm(root,{recursive:true,force:true});}
   });
   it('repairs an invalid world proposal before one commit and delivers without another main-model call',async()=>{

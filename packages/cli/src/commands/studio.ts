@@ -1,5 +1,4 @@
-import { Command } from "commander";
-import { findProjectRoot, log, logError, GLOBAL_CONFIG_DIR } from "../utils.js";
+import { log, logError, GLOBAL_CONFIG_DIR } from "../utils.js";
 import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -237,16 +236,4 @@ export async function launchStudioEntry(
   await launchStudioWorkbench(prepared.root, port, prepared.initialized ? "#/services" : "");
 }
 
-export function createStudioCommand(hooks: StudioCommandHooks = {}): Command {
-  return new Command("studio")
-  .description("Start InkOS Studio web workbench")
-  .option("-p, --port <port>", "Server port", "4567")
-  .option("--project <path>", "Open or initialize a specific InkOS project directory")
-  .action(async (opts) => {
-    const root = opts.project ? resolve(opts.project) : findProjectRoot();
-    const port = opts.port;
-    await launchStudioEntry(root, port, hooks, { explicitProject: Boolean(opts.project) });
-  });
-}
-
-export const studioCommand = createStudioCommand();
+export { createStudioCommand, studioCommand } from "./studio-command.js";

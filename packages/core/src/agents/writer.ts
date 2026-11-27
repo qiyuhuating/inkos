@@ -6,6 +6,8 @@ import { buildWriterSystemPrompt } from "./writer-prompts.js";
 import { buildSettlerSystemPrompt, buildSettlerUserPrompt } from "./settler-prompts.js";
 import { createSettlementToolSchema } from "./settler-tool.js";
 import { ChapterDraftToolSchema } from "./writer-tool.js";
+import { Type } from "@sinclair/typebox";
+import { applyStyleRepairs, continuityStyleHints, lintChapterStyle, styleRepairTargets } from "../style-linter.js";
 import { readBookRules } from "./rules-reader.js";
 import type { ChapterIntent, ChapterMemo, ContextPackage } from "../models/input-governance.js";
 import type { LengthSpec } from "../models/length-governance.js";
@@ -100,12 +102,11 @@ export class WriterAgent extends BaseAgent {
   async writeChapter(input: WriteChapterInput): Promise<WriteChapterOutput> {
     const { book, bookDir, chapterNumber } = input;
 
-    const [styleGuide, runtimeSnapshot] = await Promise.all([
+    const [styleGuide, runtimeSnapshot, parsedBookRules] = await Promise.all([
       this.readFileOrDefault(join(bookDir, "story/style_guide.md")),
       loadRuntimeStateSnapshot(bookDir),
+      readBookRules(bookDir),
     ]);
-
-    const parsedBookRules = await readBookRules(bookDir);
     const bookRules = parsedBookRules.rules;
     const bookRulesBody = parsedBookRules.body;
 
@@ -154,10 +155,47 @@ export class WriterAgent extends BaseAgent {
       },
       { temperature: creativeTemperature },
     );
+    let content = creativeSubmission.content.trim();
+    let repairUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    const styleIssues = lintChapterStyle(content);
+    if (styleIssues.length > 0) {
+      const { result, usage } = await this.submitStructured(
+        [
+          { role: "system", content: resolvedLanguage === "en"
+            ? "Repair only flagged prose paragraphs. Remove stock phrases and excess dashes, use concrete action rather than abstract emotion, and avoid explanatory moralizing at paragraph endings. Preserve every plot fact, character voice, viewpoint, injury, possession, and intentional dialogue. Adjacent paragraphs are read-only context. Return only the smallest necessary replacements; do not invent or delete story events."
+            : "仅精修被标记的正文段落。去除套话与多余破折号，用具体动作替代空泛情绪，不在段末解释或升华。保留剧情事实、人物说话习惯、视角、伤势、道具和有意使用的对白。相邻段落仅供阅读。只返回必要的最小替换，不得新增或删除剧情事件。" },
+          { role: "user", content: JSON.stringify(styleRepairTargets(content, styleIssues)) },
+        ],
+        {
+          name: "submit_style_repairs",
+          label: resolvedLanguage === "en" ? "Submit paragraph repairs" : "提交局部精修",
+          description: "Replace only distinct flagged paragraphs; keep all other text unchanged.",
+          parameters: Type.Object({
+            repairs: Type.Array(Type.Object({
+              paragraph: Type.Integer({ minimum: 0 }),
+              replacement: Type.String({ minLength: 1 }),
+            })),
+          }),
+          validate: (value) => {
+            applyStyleRepairs(content, value.repairs);
+            return value;
+          },
+        },
+        { temperature: 0.3, professionalGuidance: false },
+      );
+      content = applyStyleRepairs(content, result.repairs);
+      repairUsage = usage;
+    }
+    for (const hint of continuityStyleHints(content, runtimeSnapshot.currentState.facts, chapterNumber)) {
+      this.logWarn(resolvedLanguage, {
+        zh: "连续性待审查（不自动修改）：" + hint,
+        en: "Possible continuity conflict (not automatically changed): " + hint,
+      });
+    }
     const creative = {
       title: creativeSubmission.title.trim(),
-      content: creativeSubmission.content.trim(),
-      wordCount: countChapterLength(creativeSubmission.content, resolvedLengthSpec.countingMode),
+      content,
+      wordCount: countChapterLength(content, resolvedLengthSpec.countingMode),
     };
 
     // ── Phase 2: State settlement (temperature 0.3) ──
@@ -190,9 +228,9 @@ export class WriterAgent extends BaseAgent {
 
     // ── Merge into WriteChapterOutput ──
     const tokenUsage: TokenUsage = {
-      promptTokens: creativeUsage.promptTokens + settleUsage.promptTokens,
-      completionTokens: creativeUsage.completionTokens + settleUsage.completionTokens,
-      totalTokens: creativeUsage.totalTokens + settleUsage.totalTokens,
+      promptTokens: creativeUsage.promptTokens + repairUsage.promptTokens + settleUsage.promptTokens,
+      completionTokens: creativeUsage.completionTokens + repairUsage.completionTokens + settleUsage.completionTokens,
+      totalTokens: creativeUsage.totalTokens + repairUsage.totalTokens + settleUsage.totalTokens,
     };
 
     return {

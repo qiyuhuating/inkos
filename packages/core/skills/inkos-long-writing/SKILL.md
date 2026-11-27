@@ -23,3 +23,13 @@ Apply this method inside the active architect, writer, auditor, or reviser opera
 
 Load `references/foundation-design.md` while creating or rebuilding a book foundation. Load `references/reader-contract-and-progression.md` while planning, writing, reviewing, or revising chapters.
 Load `references/state-projection.md` while observing a completed chapter or settling runtime truth files.
+
+## Fiction prose constraints
+
+- In narration, avoid empty stock phrases such as 命运的齿轮开始转动, 一切才刚刚开始, 仿佛整个世界都安静了下来, 时间仿佛在这一刻静止, and little did they know. Preserve meaningful quoted dialogue and citations.
+- Count contiguous em/en dashes as one punctuation event; keep at most two events per 1,000 non-whitespace characters of the chapter. Prefer a sentence break or a specific action.
+- Show emotions through the character's concrete choices, gestures, sensory evidence and consequences; keep direct interior thought when it adds otherwise inaccessible information.
+- Do not append an explanation, aphorism, recap, or moral to a paragraph whose action already conveys its meaning. End on a new fact, decision, consequence, or question grounded in the scene.
+- Distinguish speakers through vocabulary, syntax, registers, knowledge and individual habits from role cards. Do not force identical sentence rhythms.
+- Flag possible injury or possession contradictions against active state facts; do not silently rewrite canon or infer healing/acquisition/loss without narrative evidence.
+- For style-only repair, return only the flagged paragraphs with the smallest necessary changes. Preserve other paragraphs, plot facts, POV, and meaningful dialogue.

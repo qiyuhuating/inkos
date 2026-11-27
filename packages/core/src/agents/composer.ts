@@ -617,68 +617,49 @@ async function collectSelectedContext(
           protection: "protected" as const,
         }];
 
-    const entries = await Promise.all([
-      maybeContextSource(
-        storyDir,
-        "current_focus.md",
-        "Current task focus for this chapter.",
-        "protected",
-      ),
-      maybeContextSource(
-        storyDir,
-        "author_intent.md",
-        "User's long-term authorial intent and direction — binding, overrides model defaults.",
-        "protected",
-      ),
-      maybeContextSource(
-        storyDir,
-        "style_guide.md",
-        "User-approved style guidance for this Work.",
-        "protected",
-      ),
+    const [entries, canonEntries, snapshot, storyFrame, volumeMap, roleCandidates] = await Promise.all([
+      Promise.all([
+        maybeContextSource(storyDir, "current_focus.md", "Current task focus for this chapter.", "protected"),
+        maybeContextSource(storyDir, "author_intent.md", "User's long-term authorial intent and direction — binding, overrides model defaults.", "protected"),
+        maybeContextSource(storyDir, "style_guide.md", "User-approved style guidance for this Work.", "protected"),
+      ]),
+      Promise.all([
+        maybeContextSource(storyDir, "parent_canon.md", "Preserve parent canon constraints for governed continuation or fanfic writing.", "protected"),
+        maybeContextSource(storyDir, "fanfic_canon.md", "Preserve extracted fanfic canon constraints for governed writing.", "protected"),
+      ]),
+      loadRuntimeStateSnapshot(dirname(storyDir)),
+      readFileOrDefault(join(storyDir, "outline/story_frame.md")),
+      readFileOrDefault(join(storyDir, "outline/volume_map.md")),
+      readRoleCardCandidates(storyDir),
     ]);
     const currentStateEntries = await selectCurrentStateEntries({
-      storyDir,
+      snapshot,
       plan,
       language,
       selector: outlineSectionSelector,
     });
     const outlineEntries = [
       ...await maybeOutlineSectionSources(
-        storyDir,
+        storyFrame,
         "outline/story_frame.md",
-      "Preserve canon constraints referenced by the active chapter brief or hard constraints.",
-      plan,
-      "story-frame",
-      language,
-      outlineSectionSelector,
-    ),
+        "Preserve canon constraints referenced by the active chapter brief or hard constraints.",
+        plan,
+        "story-frame",
+        language,
+        outlineSectionSelector,
+      ),
       ...await maybeOutlineSectionSources(
-        storyDir,
+        volumeMap,
         "outline/volume_map.md",
-      "Anchor the default planning node for this chapter.",
-      plan,
-      "volume-map",
-      language,
-      outlineSectionSelector,
-    ),
+        "Anchor the default planning node for this chapter.",
+        plan,
+        "volume-map",
+        language,
+        outlineSectionSelector,
+      ),
     ];
-    const canonEntries = await Promise.all([
-      maybeContextSource(
-        storyDir,
-        "parent_canon.md",
-        "Preserve parent canon constraints for governed continuation or fanfic writing.",
-        "protected",
-      ),
-      maybeContextSource(
-        storyDir,
-        "fanfic_canon.md",
-        "Preserve extracted fanfic canon constraints for governed writing.",
-        "protected",
-      ),
-    ]);
     const roleEntries = await selectRoleCardEntries({
-      storyDir,
+      candidates: roleCandidates,
       plan,
       language,
       selector: outlineSectionSelector,
@@ -737,13 +718,12 @@ async function collectSelectedContext(
 }
 
 async function selectCurrentStateEntries(params: {
-  readonly storyDir: string;
+  readonly snapshot: Awaited<ReturnType<typeof loadRuntimeStateSnapshot>>;
   readonly plan: PlanChapterOutput;
   readonly language: "zh" | "en";
   readonly selector?: OutlineSectionSelector;
 }): Promise<ContextPackage["selectedContext"]> {
-  const snapshot = await loadRuntimeStateSnapshot(dirname(params.storyDir));
-  const candidates = snapshot.currentState.facts.map((fact, index) => ({
+  const candidates = params.snapshot.currentState.facts.map((fact, index) => ({
     source: `runtime/current_state#${index + 1}-${slugifyAnchor(`${fact.subject}-${fact.predicate}`)}`,
     heading: `${fact.subject} / ${fact.predicate}`,
     excerpt: [
@@ -777,31 +757,37 @@ async function selectCurrentStateEntries(params: {
   }));
 }
 
+async function readRoleCardCandidates(storyDir: string): Promise<OutlineSectionSelectionRequest["candidates"]> {
+  const groups = await Promise.all(["主要角色", "次要角色", "major", "minor"].map(async (tier) => {
+    const directory = join(storyDir, "roles", tier);
+    try {
+      return (await readdir(directory)).filter((file) => file.endsWith(".md")).sort().map((file) => ({
+        tier, directory, file,
+      }));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+  }));
+  const files = groups.flat();
+  const candidates: Array<{ source: string; heading: string; excerpt: string }> = [];
+  for (let offset = 0; offset < files.length; offset += 16) {
+    candidates.push(...await Promise.all(files.slice(offset, offset + 16).map(async ({ tier, directory, file }) => ({
+      source: "story/roles/" + tier + "/" + file,
+      heading: file.slice(0, -3),
+      excerpt: (await readFile(join(directory, file), "utf-8")).trim(),
+    }))));
+  }
+  return candidates;
+}
+
 async function selectRoleCardEntries(params: {
-  readonly storyDir: string;
+  readonly candidates: OutlineSectionSelectionRequest["candidates"];
   readonly plan: PlanChapterOutput;
   readonly language: "zh" | "en";
   readonly selector?: OutlineSectionSelector;
 }): Promise<ContextPackage["selectedContext"]> {
-  const candidates: Array<{ source: string; heading: string; excerpt: string }> = [];
-  for (const tier of ["主要角色", "次要角色", "major", "minor"]) {
-    const directory = join(params.storyDir, "roles", tier);
-    let files: string[];
-    try {
-      files = (await readdir(directory)).filter((file) => file.endsWith(".md")).sort();
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw error;
-    }
-    for (const file of files) {
-      const source = `story/roles/${tier}/${file}`;
-      candidates.push({
-        source,
-        heading: file.slice(0, -3),
-        excerpt: (await readFile(join(directory, file), "utf-8")).trim(),
-      });
-    }
-  }
+  const candidates = params.candidates;
   if (candidates.length === 0) return [];
   if (!params.selector) throw new Error("Role-card semantic selector is required.");
   const selected = new Set(await params.selector({
@@ -912,7 +898,7 @@ async function maybeContextSource(
 }
 
 async function maybeOutlineSectionSources(
-  storyDir: string,
+  content: string,
   fileName: "outline/story_frame.md" | "outline/volume_map.md",
   reason: string,
   plan: PlanChapterOutput,
@@ -920,9 +906,6 @@ async function maybeOutlineSectionSources(
   language: "zh" | "en",
   outlineSectionSelector?: OutlineSectionSelector,
 ): Promise<ContextPackage["selectedContext"]> {
-    const path = join(storyDir, fileName);
-    const content = await readFileOrDefault(path);
-
     if (!content) return [];
 
     return await selectOutlineSectionEntries({

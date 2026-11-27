@@ -623,6 +623,50 @@ pnpm test         # 运行测试
 pnpm typecheck    # 类型检查
 ```
 
+## Fork 性能与写作质量实验
+
+### 分阶段模型路由
+
+Planner、Composer、Writer 和 Auditor 可独立设置模型。将计划、上下文筛选和审稿配置为满足任务容量要求的快速模型，将正文配置为更擅长创作的模型。未配置的阶段仍使用全局模型。模型覆盖使用对应模型的上下文和输出容量；正文的上下文预算以 Writer 的模型为准。状态结算继续使用 Writer 的模型。
+
+```bash
+inkos config set-model planner <fast-model>
+inkos config set-model composer <fast-model>
+inkos config set-model auditor <fast-model>
+inkos config set-model writer <writing-model>
+inkos config show-models
+```
+
+上面的模型名称是配置示例，不是内置默认模型。跨服务商覆盖按原有 `--base-url` 等选项设置。
+
+### 写作约束
+
+`style-linter.ts` 在正文生成后、事实结算前检查叙述套话与破折号密度。只有命中规则才触发结构化段落精修，非目标段落保持原样；仅接受规则问题减少且没有引入新的同类问题的结果。潜在伤势与道具冲突只提示审查，不自动改动剧情。内置长篇与去套话技能同时提供同 ID 的 `.agents/skills/` 覆盖版本，保留原参考文件；若写作项目不在本仓库，将覆盖目录复制到该项目的 `.agents/skills/` 即可。
+
+### 本地对照实验
+
+基线为上游 commit `53adac4e974b54dafda975edc4edd07cad364c18`。Windows、Node.js 24.16.0、pnpm 9，使用相同的 [外部 GPT 原创章节](benchmarks/chapter-001.md)（874 个非空白字符）。以下为开发期间实测中位数：
+
+| 指标 | v1 | v2 | 变化 |
+| --- | ---: | ---: | ---: |
+| CLI `--help` 启动 | 848.3 ms | 512.7 ms | -39.6% |
+| CLI 峰值 RSS | 136.9 MiB | 107.2 MiB | -21.7% |
+| CLI CPU 时间 | 999 ms | 655 ms | -34.4% |
+| FTS5 首次建索引（1,000 条） | 50.261 ms | 45.267 ms | -9.9% |
+| FTS5 未变更索引（1,000 条） | 36.848 ms | 1.762 ms | -95.2% |
+| FTS5 单条变更 | 36.038 ms | 1.792 ms | -95.0% |
+| FTS5 中文检索 | 0.134 ms | 0.116 ms | -13.3% |
+| Compose（128 张角色卡，138 个条目） | 21.140 ms | 9.628 ms | -54.5% |
+
+CLI 交替执行五次/版本；FTS5 在内存数据库中各执行三轮；Compose 预热后交替执行六次/版本，真实读取、筛选及运行时文件写入，筛选结果固定且两版上下文 JSON 完全一致。CLI/FTS5 数据来自 v2 早期优化检查点；Compose 来自加入并行读取后的检查点。
+
+```bash
+# 两份工作树均按锁文件安装依赖并构建后，在优化版根目录运行
+node benchmarks/compose-replay.mjs ../inkos ../inkos-v2 benchmarks/chapter-001.md
+```
+
+这是外部正文与固定语义结果回放实验，不是完整模型写章基准。没有真实模型推理延迟、首 Token 延迟、精确 Token 用量、单章完整持久化或文学质量改善的对照数据。内存 FTS5 实验不能衡量磁盘 WAL 的效果。所有上游署名和 AGPL-3.0 许可证保持不变。
+
 ## Star History
 
 <a href="https://www.star-history.com/#Narcooo/inkos&type=date&legend=top-left">
