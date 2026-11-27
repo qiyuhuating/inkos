@@ -755,6 +755,21 @@ node benchmarks/session-transcript-replay.mjs ../inkos ../inkos-v2 benchmarks/ch
 
 没有在线模型或完整长会话堆内存对照，保持上一版的创作自主性策略；SQLite 跨任务连接池和进一步提示词压缩未实施。
 
+### 活跃会话、工具归档与原生 Office 导出
+
+- Pi 已完成消息使用弱引用度量缓存（仅对明确不可变的已完成消息启用），摘要缓存只存消息数、SHA-256 前缀指纹及摘要，不再复制全部历史正文。历史替换使指纹失效；当前工具循环用一次逆向扫描查找完整调用/结果边界。完整消息历史仍可从 transcript 恢复；摘要尚未跨进程持久化。
+- 成功的 `workspace__read`（项目读取权限或明确 artifactId）和 `workspace__retrieve_material` 文本观察超过 32 KiB 时，先写入会话级内容寻址归档 `.inkos/tool-results/<session-hash>/`，再将 8 KiB 预览、原文哈希、地址及必要回执写入 Pi 消息和 transcript。精确原始回执 JSON 和文本均保存，Episode ledger 仍保留真实 ActionResult。新只读工具 `read_archived_tool_result` 以 UTF-8 字节偏移分页恢复，验证地址及会话作用域；删除会话时清理相应归档。失败、写入、确认及其他能力保持原路径。完整阅读大文件可能增加分页模型调用，归档也增加磁盘占用；不声称总堆内存按回执比例下降。
+- `workspace__export_work` 支持 `format: "docx"`（Markdown 源、标题/段落/基础管道表格）和 `format: "xlsx"`（JSON 记录数组、文本/数字/布尔值原生类型）。字符串公式不执行，版本校验及原始文件保留；`review_and_export_work_artifact` 也支持 DOCX。使用既有 JSZip 生成实际 OOXML 包，保存为带正确 MIME 类型的 Work 导出版本，无新依赖。非完整 Markdown 渲染、既有 Office 文件原位保真编辑、复杂样式和公式编辑尚不支持。
+- 中英文主提示词行为边界合并为六条，原文估算 token 中文 1015 → 432、英文 932 → 438；保留事实/权限/确认/版本、Skill 及模型表达自主性。摘要提示词保留原文归档地址和部分阅读证据。
+
+本轮本地缓存开关对照：240 条约 2.70 MB 历史，预热后重复 20 次上下文组装，交替六轮/模式，关闭缓存中位数 264.788 ms，开启 0.736 ms。两种模式语义摘要固定且仅调用一次，模型投影一致。不是与旧版完整流程或在线模型的对照。工具归档样本为 558734 → 17822 字节的序列化回执，原始 272400 字节正文分页拼接完全一致。
+
+```bash
+node benchmarks/context-metrics-replay.mjs benchmarks/chapter-001.md
+```
+
+在线模型质量/推理、跨进程日志锁、SQLite 跨任务池、完整活跃会话 RSS 尚未实测或实现。
+
 ## Star History
 
 <a href="https://www.star-history.com/#Narcooo/inkos&type=date&legend=top-left">

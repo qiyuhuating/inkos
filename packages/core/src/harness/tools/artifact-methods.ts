@@ -34,6 +34,7 @@ const Parameters = Type.Object({ artifactId: Type.String(), revisionId: Type.Opt
 const Replacement = Type.Object({ content: Type.String({ minLength: 1 }) });
 const DeliveryParameters = Type.Object({
   ...Type.Omit(Parameters, ['editRanges']).properties,
+  format: Type.Optional(Type.Union([Type.Literal('md'), Type.Literal('docx')])),
 }, {additionalProperties: false});
 
 /** A requested review/export pair shares one pinned revision and one action receipt. */
@@ -43,7 +44,7 @@ export function createDeliverWorkArtifactTool(pipeline: PipelineRunner, root: st
   return {
     artifactsCommitted: true,
     name: 'review_and_export_work_artifact', label: 'Review and export artifact', parameters: DeliveryParameters,
-    description: "Review and export a current standalone source Markdown artifact, such as a script or storyboard. Persist the professional review, then export exactly that revision. For a domain-generated collection such as a novel, first refresh it with the domain export action, then call review_work_artifact on the resulting export revision. Findings are separate from execution: an exported draft may still need revision. Never edits the manuscript.",
+    description: "Review and export a current standalone source Markdown artifact to Markdown or native DOCX, such as a script or storyboard. Persist the professional review, then export exactly that revision. For a domain-generated collection such as a novel, first refresh it with the domain export action, then call review_work_artifact on the resulting export revision. Findings are separate from execution: an exported draft may still need revision. Never edits the manuscript.",
     async execute(id, params, signal, onUpdate) {
       const {artifact, revision} = await readArtifactRevision({projectRoot: root, workId, artifactId: params.artifactId, revisionId: params.revisionId});
       if (revision.id !== artifact!.currentRevisionId || !revision.path.endsWith('.md') || revision.path.startsWith('source/exports/')) {
@@ -58,7 +59,7 @@ export function createDeliverWorkArtifactTool(pipeline: PipelineRunner, root: st
       // A review failure propagates before any export; a concurrent edit cannot
       // silently turn the reviewed version into a different exported version.
       signal?.throwIfAborted();
-      const exported = await exportTool.execute(id, {artifactId: params.artifactId, expectedRevisionId: revision.id}, signal, onUpdate);
+      const exported = await exportTool.execute(id, {artifactId: params.artifactId, expectedRevisionId: revision.id, format: params.format}, signal, onUpdate);
       const output = exported.details as {path: string; sourceRevisionId: string};
       const observations = reviewed.observations.filter(item => item.category !== 'execution');
       const reviewExecutionObservations = reviewed.observations.filter(item => item.category === 'execution');

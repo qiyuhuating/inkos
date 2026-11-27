@@ -22,6 +22,7 @@ export interface CreateCapabilityPiToolsOptions {
     onUpdate?: (partialResult: unknown) => void,
   ) => Promise<ActionResult>;
   readonly includeAction?: (capabilityId: string, action: CapabilityAction) => boolean;
+  readonly projectReadResult?: (capabilityId: string, actionId: string, parameters: unknown, result: AgentToolResult<unknown>) => Promise<AgentToolResult<unknown>>;
   readonly onResult?: (
     capabilityId: string,
     actionId: string,
@@ -65,7 +66,7 @@ export function createCapabilityPiTools(
         const recoveredToolCallIds = failedReads.get(retryKey) ?? [];
         failedReads.delete(retryKey);
         await options.onResult?.(capability.id, action.id, result);
-        return {
+        const receipt: AgentToolResult<unknown> = {
           content: [{ type: "text", text: renderActionResultForAgent(result) }],
           // Studio renders domain-owned result cards (proposed_action, play
           // scene, chapter revision, etc.). The harness ActionResult remains
@@ -75,6 +76,8 @@ export function createCapabilityPiTools(
             displayText: result.content ?? result.summary, recoveredToolCallIds,
             hostExecution: { risk: action.risk, status: result.status, artifacts: result.artifacts } },
         };
+        return action.risk === "read" && result.status === "success" && options.projectReadResult
+          ? options.projectReadResult(capability.id, action.id, params, receipt) : receipt;
       },
       }))
   ));

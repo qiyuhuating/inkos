@@ -12,7 +12,8 @@ import { readArtifactRevision } from "../artifact-reader.js";
 import { changedSourceRegion } from "../../utils/source-text.js";
 
 const ExportWorkParams = Type.Object({
-  artifactId: Type.String({ minLength: 1, description: "Exact current Markdown artifact ID from inspect_work." }),
+  artifactId: Type.String({ minLength: 1, description: "Exact current source artifact ID from inspect_work." }),
+  format: Type.Optional(Type.Union([Type.Literal("md"), Type.Literal("docx"), Type.Literal("xlsx")], {description:"Markdown copy (default), native Word document from Markdown, or native Excel sheet from a JSON array of records."})),
   expectedRevisionId: Type.Optional(Type.String({ description: "Require this current revision, for example the version just reviewed." })),
 });
 
@@ -20,22 +21,29 @@ export function createExportWorkTool(projectRoot: string, workId: string): Agent
   return {
     artifactsCommitted: true,
     name: "export_work", label: "Export current manuscript",
-    description: "Export a current Markdown manuscript without reviewing it. If the user requests both review and export, use review_and_export_work_artifact. Use the exact artifact ID from inspect_work.",
+    description: "Export a current source artifact as Markdown, editable DOCX (Markdown source), or editable XLSX (JSON record array). If review and export are both requested for a Markdown manuscript, use review_and_export_work_artifact. Use the exact artifact ID.",
     parameters: ExportWorkParams,
     async execute(_id, params) {
       const { work, artifact, revision, bytes } = await readArtifactRevision({ projectRoot, workId, artifactId: params.artifactId });
       if (params.expectedRevisionId && params.expectedRevisionId !== revision.id) {
         throw Object.assign(new Error("The current artifact changed after review. Review the new revision before exporting it."), { code: "ARTIFACT_REVISION_CONFLICT" });
       }
-      if (!revision.path.endsWith(".md") || revision.path.startsWith("source/exports/")) {
-        throw Object.assign(new Error("Select a source Markdown artifact"), { code: "ARTIFACT_EXPORT_FORMAT_UNSUPPORTED" });
+      const format = params.format ?? "md";
+      if (revision.path.startsWith("source/exports/") || !revision.path.endsWith(format === "xlsx" ? ".json" : ".md")) {
+        throw Object.assign(new Error(format === "xlsx" ? "Select a source JSON array of records." : "Select a source Markdown artifact."), { code: "ARTIFACT_EXPORT_FORMAT_UNSUPPORTED" });
       }
-      const outputPath = `source/exports/${encodeURIComponent(artifact!.id)}.md`;
+      let output: Buffer = bytes;
+      if (format !== "md") {
+        const office = await import("../../utils/office-export.js");
+        output = format === "docx" ? await office.exportMarkdownDocx(bytes.toString("utf8"))
+          : await office.exportRecordsXlsx(JSON.parse(bytes.toString("utf8")), work.title);
+      }
+      const outputPath = `source/exports/${encodeURIComponent(artifact!.id)}.${format}`;
       await syncWorkSourceArtifacts({ projectRoot, workId, accept: true, acceptPaths: [outputPath],
-        writes: [{ relativePath: `works/${workId}/${outputPath}`, content: bytes }],
+        writes: [{ relativePath: `works/${workId}/${outputPath}`, content: output }],
       });
       return { content: [{ type: "text", text: `Exported ${work.title}: works/${workId}/${outputPath}` }],
-        details: { kind: "work_exported", workId, sourceArtifactId: artifact!.id, sourceRevisionId: revision.id, path: outputPath } };
+        details: { kind: "work_exported", workId, sourceArtifactId: artifact!.id, sourceRevisionId: revision.id, path: outputPath, format } };
     },
   };
 }

@@ -357,5 +357,7 @@ function contentTypeFor(path: string): string {
   if (extension === ".png") return "image/png";
   if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
   if (extension === ".webp") return "image/webp";
+  if (extension === ".docx") return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  if (extension === ".xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
   return "application/octet-stream";
 }

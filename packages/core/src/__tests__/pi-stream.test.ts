@@ -52,6 +52,51 @@ function finishResponse(status: 'answered' | 'delivered' | 'needs_input' | 'bloc
 }
 
 describe("guardedPiNonStreaming", () => {
+  it("stores large successful read results outside the active Agent transcript and pages exact archived bytes", async () => {
+    const root=await mkdtemp(join(tmpdir(),"inkos-agent-archived-read-"));
+    const sessionId="archive-fixture";
+    const original="Evidence 证据📖\n".repeat(5000)+"END OF ORIGINAL";
+    let calls=0,archiveId="";
+    const response=(name:string,args:unknown,id:string)=>new Response(JSON.stringify({choices:[{
+      finish_reason:"tool_calls",message:{tool_calls:[{id,type:"function",function:{name,arguments:JSON.stringify(args)}}]},
+    }]}));
+    fetchWithProxyMock.mockImplementation(async(_url:string,init:RequestInit)=>{
+      calls++;
+      const body=JSON.parse(String(init.body));
+      if(calls===1){
+        expect(body.tools.some((tool:any)=>tool.function.name==="read_archived_tool_result")).toBe(true);
+        return response("workspace__read",{path:"evidence.txt"},"large-read");
+      }
+      if(calls===2){
+        const message=body.messages.find((item:any)=>item.role==="tool"&&item.tool_call_id==="large-read");
+        const projected=JSON.parse(message.content);
+        archiveId=projected.archivedResult.id;
+        expect(projected.archivedResult.bytes).toBeGreaterThan(32768);
+        expect(message.content).not.toContain("END OF ORIGINAL");
+        return response("read_archived_tool_result",{id:archiveId,offset:0},"read-page");
+      }
+      if(calls===3){
+        const message=body.messages.find((item:any)=>item.role==="tool"&&item.tool_call_id==="read-page");
+        expect(JSON.parse(message.content).text).toContain("Evidence");
+        return finishResponse("answered","Read the archived page.");
+      }
+      throw new Error("Unexpected extra model request");
+    });
+    try{
+      await writeFile(join(root,"evidence.txt"),original);
+      const result=await runAgentSession({projectRoot:root,sessionId,bookId:null,workId:null,profileId:"workspace-default",sessionKind:"chat",language:"en",model,apiKey:"fixture",stream:false,pipeline:{} as never},"Read evidence.txt.");
+      expect(result.responseText).toBe("Read the archived page.");
+      expect(calls).toBe(3);
+      const events=await readTranscriptEvents(root,sessionId);
+      expect(JSON.stringify(events)).not.toContain("END OF ORIGINAL");
+      expect(JSON.stringify(events)).toContain(archiveId);
+      const {ToolResultArchive}=await import("../agent/tool-result-archive.js");
+      const archive=new ToolResultArchive(root,sessionId);
+      let restored="",offset:number|null=0;
+      do{const page=await archive.read(archiveId,offset);restored+=page.text;offset=page.nextOffset;}while(offset!==null);
+      expect(JSON.parse(restored).content).toContain("END OF ORIGINAL");
+    }finally{evictAgentCache(sessionId);await rm(root,{recursive:true,force:true});}
+  });
   it("evicts the oldest idle Agent and restores the committed conversation on demand", async () => {
     const root=await mkdtemp(join(tmpdir(),"inkos-idle-agents-"));
     const ids=Array.from({length:17},(_,index)=>"idle-fixture-"+index);

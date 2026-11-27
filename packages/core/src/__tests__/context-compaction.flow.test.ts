@@ -119,6 +119,22 @@ describe("context assembly mini-flow", () => {
     })).rejects.toBeInstanceOf(ProtectedContextOverflowError);
   });
 
+  it("reuses immutable message metrics but invalidates a summary when earlier content is replaced", async () => {
+    const profile=createBuiltInWorkProfileRegistry().require("workspace-default");
+    const histories:string[]=[];
+    const transform=createHarnessContextTransform({projectRoot:"/tmp",work:null,profile,budgetTokens:250,immutableCompletedMessages:true,
+      conversationCompactor:async request=>{histories.push(request.history);return "Verified fixture summary.";}});
+    const old={role:"user",content:"Old fact. ".repeat(400),timestamp:1} as const;
+    const current={role:"user",content:"Continue.",timestamp:2} as const;
+    await transform([old,current] as never);
+    await transform([old,{...current,timestamp:3}] as never);
+    expect(histories).toHaveLength(1);
+    await transform([{...old,content:"Corrected fact. ".repeat(400)},current] as never);
+    expect(histories).toHaveLength(2);
+    expect(histories[1]).toContain("Corrected fact.");
+    expect(histories[1]).not.toContain("Old fact.");
+  });
+
   it("compacts the complete historical middle only after the session budget is exceeded", async () => {
     const profile = createBuiltInWorkProfileRegistry().require("workspace-default");
     const history = "Earlier decision and tool outcome. ".repeat(200);

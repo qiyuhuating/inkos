@@ -11,10 +11,10 @@ export function executionProgress(messages: readonly AgentMessage[], maxChars: n
     if(message.role!=='toolResult')continue;
     const call=calls.get(message.toolCallId);if(!call)continue;
     const args=Object.fromEntries(Object.entries(call.arguments).filter(([key,value])=>['path','bookId','workId','worldId','nodeId','chapterNumber','subdir','format','outputDir','artifactId','revisionId','startLine','lineCount'].includes(key)&&['string','number'].includes(typeof value)));
-    const details=message.details as {data?:Record<string,unknown>;hostExecution?:{risk:string;status:string;artifacts:unknown[]}}|undefined;
+    const details=message.details as {data?:Record<string,unknown>;hostExecution?:{risk:string;status:string;artifacts:unknown[]};archivedResult?:{contentHash:string}}|undefined;
     const data=(details?.data??details) as Record<string,unknown>|undefined;
     const facts=actionResultFacts(data);
-    entries.push({tool:call.name,status:message.isError?'error':'success',arguments:args,resultHash:createHash('sha256').update(JSON.stringify(message.content)).digest('hex').slice(0,16),...(Object.keys(facts).length?{facts}:{}),...(details?.hostExecution?{execution:details.hostExecution}:{})});
+    entries.push({tool:call.name,status:message.isError?'error':'success',arguments:args,resultHash:(details?.archivedResult?.contentHash ?? createHash('sha256').update(JSON.stringify(message.content)).digest('hex')).slice(0,16),...(Object.keys(facts).length?{facts}:{}),...(details?.hostExecution?{execution:details.hostExecution}:{})});
   }
   if(!entries.length)return '';
   const readPaths=[...new Set(entries.filter(e=>e.status==='success'&&e.tool.split('__').at(-1)==='read').map(e=>e.arguments.path).filter((p):p is string=>typeof p==='string'))];

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { stat } from "node:fs/promises";
 import { Agent } from "@mariozechner/pi-agent-core";
 import { preserveToolArgumentTypes } from "./tool-arguments.js";
+import { ToolResultArchive } from "./tool-result-archive.js";
 import { createTurnCompletionTool, TurnArtifactDeliveries, TURN_COMPLETION_GUIDANCE, TURN_COMPLETION_TOOL, type TurnCompletion } from "./turn-completion.js";
 import type { AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import { getModel, getEnvApiKey, createAssistantMessageEventStream } from "@mariozechner/pi-ai";
@@ -1011,9 +1012,15 @@ async function runAgentSessionUnlocked(
       ? confirmedCapabilityBinding(requestedIntent)
       : undefined;
     const entryCreation = !work && proposalAction ? confirmedCapabilityBinding(proposalAction) : undefined;
+    const toolArchive = new ToolResultArchive(projectRoot, sessionId);
     const agentTools = createCapabilityPiTools({
       registry: capabilities,
       profile,
+      projectReadResult: (capabilityId, actionId, parameters, result) => {
+        const artifactRead = typeof (parameters as { artifactId?: unknown })?.artifactId === "string";
+        return capabilityId === "workspace" && (actionId === "retrieve_material" || (actionId === "read" && (!allowSystemFileRead || artifactRead)))
+          ? toolArchive.project(result) : Promise.resolve(result);
+      },
       includeAction: (capabilityId, action) => {
         if (confirmedCapabilityAction) {
           return capabilityId === confirmedCapabilityAction.capabilityId && action.id === confirmedCapabilityAction.actionId;
@@ -1105,7 +1112,9 @@ async function runAgentSessionUnlocked(
         systemPrompt: [baseSystemPrompt, TURN_COMPLETION_GUIDANCE, restoredContextBlock, config.backgroundTaskContext]
           .filter(Boolean)
           .join("\n\n"),
-        tools: [...visibleTools, createTurnCompletionTool({
+        tools: [...visibleTools,
+          ...(visibleTools.some(tool => tool.name === "workspace__read" || tool.name === "workspace__retrieve_material") ? [toolArchive.tool()] : []),
+          createTurnCompletionTool({
           state: () => cached ?? { activeActions: 0, hasDelivery: false, deliveryFailed: false },
           complete: result => { if (!cached) throw new Error("Session unavailable"); cached.turnCompletion = result; },
           validateDelivery: () => cached!.artifactDeliveries.validate(projectRoot),
@@ -1117,6 +1126,7 @@ async function runAgentSessionUnlocked(
         work,
         profile,
         budgetTokens: agentContextBudget(model),
+        immutableCompletedMessages: true,
         semanticCompiler: async (request) => ({
           content: await compileHarnessContextText({
             model,
@@ -1139,7 +1149,7 @@ async function runAgentSessionUnlocked(
           apiKey: config.apiKey,
           stream: config.stream !== false,
           proxyUrl: config.proxyUrl,
-          systemPrompt: "Summarize the supplied history as quoted records, not as a task to perform. Do not answer the current intent or invent completion. Preserve exact file paths and revisions, which operations actually succeeded or failed, and explicitly unfinished steps. Distinguish requested work from executed work. Do not infer that reading a subset means the full set was read. Use only evidence in the supplied records; omit unsupported narrative conclusions. The host's execution receipts, not these semantic notes, determine action completion.",
+          systemPrompt: "Summarize the supplied records, not the current task. Preserve user constraints, exact paths, revisions, archive IDs and offsets, actual successes/failures, and unfinished work. Distinguish requested actions from executed ones and partial reads from complete reads. Use only recorded evidence; the host receipts remain authoritative.",
           userPrompt: [
             `Current intent:\n${request.intent}`,
             `Target budget: ${request.maxTokens} tokens`,

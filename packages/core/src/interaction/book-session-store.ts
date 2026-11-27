@@ -242,6 +242,8 @@ export async function deleteBookSession(
   sessionId: string,
 ): Promise<void> {
   await rm(transcriptPath(projectRoot, sessionId), { force: true });
+  const { ToolResultArchive } = await import("../agent/tool-result-archive.js");
+  await new ToolResultArchive(projectRoot, sessionId).remove();
 }
 
 export async function bindBookSessionToBook(

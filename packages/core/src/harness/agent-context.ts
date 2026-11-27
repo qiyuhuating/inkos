@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { UserMessage } from "@mariozechner/pi-ai";
 import { estimateTextTokens } from "../llm/provider.js";
@@ -30,6 +31,8 @@ export function createHarnessContextTransform(input: {
   readonly semanticCompiler?: SemanticContextCompiler;
   readonly conversationCompactor?: ConversationCompactor;
   readonly onContextCompression?: ContextCompressionCallback;
+  /** Pi passes completed, immutable messages at the transport boundary. */
+  readonly immutableCompletedMessages?: boolean;
 }): (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]> {
   const sources = new ContextSourceRegistry();
   sources.register({
@@ -64,7 +67,9 @@ export function createHarnessContextTransform(input: {
     },
   });
 
-  let cached: {frames:string[];summary:string} | undefined;
+  const metrics = new MessageMetrics(input.immutableCompletedMessages === true);
+  const estimateAgentMessages = (messages: readonly AgentMessage[]) => metrics.estimate(messages);
+  let cached: {count:number;digest:string;summary:string} | undefined;
   return async (messages, signal) => {
     const lastUserIndex = findLastUserIndex(messages);
     let historicalMessages = lastUserIndex > 0 ? messages.slice(0, lastUserIndex) : [];
@@ -75,9 +80,22 @@ export function createHarnessContextTransform(input: {
     if (lastUserIndex >= 0 && estimateAgentMessages(protectedTail) > input.budgetTokens * 0.6
       && input.conversationCompactor && closedToolExchanges(protectedTail.slice(1))) {
       let boundary=protectedTail.length;
+      let suffixUnits=0;
+      const calls=new Set<string>(), results=new Set<string>();
+      let unmatched=0;
       for(let i=protectedTail.length-1;i>=1;i--){
-        if(protectedTail[i]?.role==='assistant'&&closedToolExchanges(protectedTail.slice(i))
-          &&estimateAgentMessages(protectedTail.slice(i))<input.budgetTokens*0.2)boundary=i;
+        const message=protectedTail[i]!;
+        suffixUnits += metrics.units(message)+(i===protectedTail.length-1?0:1);
+        if(Math.ceil(suffixUnits/4)>=input.budgetTokens*0.2)break;
+        if(message.role==="toolResult"&&!results.has(message.toolCallId)){
+          results.add(message.toolCallId);unmatched+=calls.has(message.toolCallId)?-1:1;
+        }
+        if(message.role==="assistant"){
+          for(const part of message.content)if(part.type==="toolCall"&&!calls.has(part.id)){
+            calls.add(part.id);unmatched+=results.has(part.id)?-1:1;
+          }
+          if(calls.size>0&&unmatched===0)boundary=i;
+        }
       }
       historicalMessages = [...historicalMessages, ...protectedTail.slice(1,boundary)];
       protectedTail = [messages[lastUserIndex]!,...protectedTail.slice(boundary)];
@@ -127,9 +145,8 @@ export function createHarnessContextTransform(input: {
     if (summaryBudget <= 0) {
       throw new ProtectedContextOverflowError(workTokens + tailTokens, input.budgetTokens);
     }
-    const frames=historicalMessages.map(m=>renderAgentMessages([m]));
-    const extendsCache=cached&&cached.frames.length<=frames.length&&cached.frames.every((frame,i)=>frame===frames[i]);
-    const delta=extendsCache?historicalMessages.slice(cached!.frames.length):[];
+    const extendsCache=cached&&cached.count<=historicalMessages.length&&cached.digest===metrics.digest(historicalMessages,cached.count);
+    const delta=extendsCache?historicalMessages.slice(cached!.count):[];
     const cachedTokens=extendsCache?estimateTextTokens(cached!.summary)+estimateAgentMessages(delta):Infinity;
     let summary:string;
     let retainedDelta:AgentMessage[]=[];
@@ -143,7 +160,7 @@ export function createHarnessContextTransform(input: {
       signal,
     })).trim();
     if (!summary) throw new Error("Conversation compactor returned empty content");
-    cached={frames,summary};
+    cached={count:historicalMessages.length,digest:metrics.digest(historicalMessages,historicalMessages.length),summary};
     input.onContextCompression?.({ category: "session_context", phase: "end", sources: ["session transcript"] });
     }
     const summaryMessage: UserMessage = {
@@ -184,19 +201,43 @@ function findLastUserIndex(messages: ReadonlyArray<AgentMessage>): number {
   return -1;
 }
 
-function estimateAgentMessages(messages: ReadonlyArray<AgentMessage>): number {
-  return estimateTextTokens(renderAgentMessages(messages));
+class MessageMetrics {
+  private readonly cache = new WeakMap<AgentMessage, { units: number; hash: string }>();
+  constructor(private readonly immutable: boolean) {}
+  private measure(message: AgentMessage) {
+    const previous = this.immutable ? this.cache.get(message) : undefined;
+    if (previous) return previous;
+    const frame = renderAgentMessage(message);
+    let cjk = 0;
+    for (let i = 0; i < frame.length; i++) { const code = frame.charCodeAt(i); if (code >= 0x3400 && code <= 0x9fff) cjk++; }
+    const value = { units: frame.length + 3 * cjk, hash: createHash("sha256").update(frame).digest("hex") };
+    if (this.immutable) this.cache.set(message, value);
+    return value;
+  }
+  units(message: AgentMessage): number { return this.measure(message).units; }
+  estimate(messages: readonly AgentMessage[]): number {
+    let units = Math.max(0, messages.length - 1);
+    for (const message of messages) units += this.units(message);
+    return Math.ceil(units / 4);
+  }
+  digest(messages: readonly AgentMessage[], count: number): string {
+    const hash = createHash("sha256");
+    for (let index = 0; index < count; index++) hash.update(this.measure(messages[index]!).hash);
+    return hash.digest("hex");
+  }
 }
 
-function renderAgentMessages(messages: ReadonlyArray<AgentMessage>): string {
+function renderAgentMessage(message: AgentMessage): string {
   // UI details often repeat the full tool payload. Pi sends content to the
   // model; counting details/cost/signature metadata can double the budget.
-  return messages.map((message) => {
-    const raw = message as {role:string;content?:unknown;toolCallId?:string;toolName?:string;isError?:boolean};
-    return JSON.stringify({role:raw.role,content:raw.content,
-      ...(raw.role === "toolResult" ? {toolCallId:raw.toolCallId,toolName:raw.toolName,isError:raw.isError} : {}),
-    });
-  }).join("\n");
+  const raw = message as {role:string;content?:unknown;toolCallId?:string;toolName?:string;isError?:boolean};
+  return JSON.stringify({role:raw.role,content:raw.content,
+    ...(raw.role === "toolResult" ? {toolCallId:raw.toolCallId,toolName:raw.toolName,isError:raw.isError} : {}),
+  });
+}
+
+function renderAgentMessages(messages: readonly AgentMessage[]): string {
+  return messages.map(renderAgentMessage).join("\n");
 }
 
 function latestUserText(messages: ReadonlyArray<AgentMessage>): string {
