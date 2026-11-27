@@ -322,8 +322,8 @@ export async function runWorkerAgentTool<TParameters extends TSchema>(
   }
   const model = workerModel(client, modelId, options.maxTokens);
   const systemPrompt = [
-    ...messages.filter((message) => message.role === "system").map((message) => message.content),
     `Finish by calling ${resultTool.name} exactly once. Do not print the result as prose or JSON.`,
+    ...messages.filter((message) => message.role === "system").map((message) => message.content),
   ].join("\n\n");
   const promptMessages = toAgentMessages(messages, model);
   if (promptMessages.length === 0) {
@@ -446,15 +446,17 @@ export async function runWorkerAgentTool<TParameters extends TSchema>(
         lastAssistantText: last?.content.filter((part)=>part.type==="text").map((part)=>part.text).join(""),
       });
     }
-    const usageMessage = [...agent.state.messages].reverse().find(
+    const usageMessages = agent.state.messages.filter(
       (message): message is AssistantMessage => message.role === "assistant" && message.usage.totalTokens > 0,
     );
-    if (usageMessage) {
-      options.onUsage?.({
-        promptTokens: usageMessage.usage.input,
-        completionTokens: usageMessage.usage.output,
-        totalTokens: usageMessage.usage.totalTokens,
-      });
+    if (usageMessages.length) {
+      options.onUsage?.(usageMessages.reduce((total, { usage }) => ({
+        // Pi providers can separate cache reads/writes from uncached input.
+        // Total less output counts all prompt tokens exactly once.
+        promptTokens: total.promptTokens + Math.max(0, usage.totalTokens - usage.output),
+        completionTokens: total.completionTokens + usage.output,
+        totalTokens: total.totalTokens + usage.totalTokens,
+      }), { promptTokens: 0, completionTokens: 0, totalTokens: 0 }));
     }
     return submitted;
   } finally {

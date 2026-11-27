@@ -1,5 +1,6 @@
 import { recordExecutionEvidence } from "../harness/execution-evidence.js";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { createAssistantMessageEventStream, streamSimple } from "@mariozechner/pi-ai";
 import type {
   Api,
@@ -47,12 +48,13 @@ export function guardedPiStream<TApi extends Api>(
     estimatedInputTokens: estimatePiContextTokens(context),
     reservedOutputTokens,
   });
+  const startedAt = performance.now();
   const modelCall = beginAgentModelCall();
   recordExecutionEvidence("model-call-started", { trace: modelCall, model: model.id, context, maxTokens: reservedOutputTokens });
   const traceHeaders = agentTrajectoryHeaders(model.baseUrl, modelCall, 1, {
     effort: String(options?.reasoning ?? (model.reasoning ? "enabled" : "disabled")),
   });
-  return observeModelStream(model, modelCall?.modelCallId, guardAssistantMessageStream(
+  return observeModelStream(model, modelCall?.modelCallId, startedAt, true, guardAssistantMessageStream(
     model,
     (signal) => streamSimple(model, context, {
       ...options,
@@ -115,6 +117,7 @@ export function guardedPiNonStreaming<TApi extends Api>(
   });
   const eventStream = createAssistantMessageEventStream();
   const output = emptyAssistantMessage(model);
+  const startedAt = performance.now();
   const modelCall = beginAgentModelCall();
   void (async () => {
     try {
@@ -176,7 +179,7 @@ export function guardedPiNonStreaming<TApi extends Api>(
       eventStream.end();
     }
   })();
-  return observeModelStream(model, modelCall?.modelCallId, eventStream, emptyRetries > 0 && !options?.signal?.aborted ? () => guardedPiNonStreaming(model, context, options, proxyUrl, emptyRetries - 1) : undefined,
+  return observeModelStream(model, modelCall?.modelCallId, startedAt, false, eventStream, emptyRetries > 0 && !options?.signal?.aborted ? () => guardedPiNonStreaming(model, context, options, proxyUrl, emptyRetries - 1) : undefined,
     (options as SimpleStreamOptions & { toolChoice?: unknown } | undefined)?.toolChoice);
 }
 
@@ -190,9 +193,17 @@ function missingRequiredTool(message: AssistantMessage, choice: unknown): boolea
   return !message.content.some(part => part.type === "toolCall" && (!name || part.name === name));
 }
 
-function observeModelStream(model: Model<Api>, modelCallId: string | undefined, source: AssistantMessageEventStream, retry?: () => AssistantMessageEventStream, toolChoice?: unknown): AssistantMessageEventStream {
+function observeModelStream(model: Model<Api>, modelCallId: string | undefined, startedAt: number, streaming: boolean, source: AssistantMessageEventStream, retry?: () => AssistantMessageEventStream, toolChoice?: unknown): AssistantMessageEventStream {
   const output = createAssistantMessageEventStream();
   let started = false;
+  let firstTextMs: number | undefined;
+  let firstToolArgumentMs: number | undefined;
+  const timing = () => ({
+    elapsedMs: performance.now() - startedAt,
+    firstTextMs: firstTextMs ?? null,
+    firstToolArgumentMs: firstToolArgumentMs ?? null,
+    streaming,
+  });
   const forward = (event: Parameters<typeof output.push>[0]) => {
     // Pi appends a transcript message on start. Transport attempts belong to
     // one logical response; a retry replaces its provisional partial message.
@@ -204,11 +215,17 @@ function observeModelStream(model: Model<Api>, modelCallId: string | undefined, 
     try {
       let pendingStart: Parameters<typeof output.push>[0] | undefined;
       for await (const event of source) {
+        if (streaming && event.type === "text_delta" && event.delta.length && firstTextMs === undefined) {
+          firstTextMs = performance.now() - startedAt;
+        }
+        if (streaming && event.type === "toolcall_delta" && event.delta.length && firstToolArgumentMs === undefined) {
+          firstToolArgumentMs = performance.now() - startedAt;
+        }
         if ("partial" in event) lastPartial = event.partial;
         if (event.type === "start") { pendingStart = event; continue; }
         if (event.type === "error" && retry && event.error.stopReason !== "aborted"
           && (event.error as AssistantMessage & {errorCode?: string}).errorCode === "MODEL_STREAM_INACTIVITY") {
-          recordExecutionEvidence("model-call-completed", {modelCallId,status:"error",response:event.error,
+          recordExecutionEvidence("model-call-completed", {modelCallId,status:"error",response:event.error,...timing(),
             ...(lastPartial?.content.length?{partialOutput:lastPartial}:{})});
           recordExecutionEvidence("model-call-retry", {modelCallId,reason:"MODEL_STREAM_INACTIVITY"});
           for await (const retried of retry()) forward(retried);
@@ -218,7 +235,7 @@ function observeModelStream(model: Model<Api>, modelCallId: string | undefined, 
           && !discardedToolOutputs.has(event.message)
           && !lastPartial?.content.some(part => part.type === "toolCall")
           && !event.message.content.some(part => part.type === "toolCall" || (part.type === "text" && part.text.trim().length > 0))) {
-          recordExecutionEvidence("model-call-completed", { modelCallId, status: "empty", response: event.message });
+          recordExecutionEvidence("model-call-completed", { modelCallId, status: "empty", response: event.message, ...timing() });
           if (retry) {
             recordExecutionEvidence("model-call-retry", { modelCallId, reason: "MODEL_EMPTY_RESPONSE" });
             for await (const retried of retry()) forward(retried);
@@ -231,7 +248,7 @@ function observeModelStream(model: Model<Api>, modelCallId: string | undefined, 
         }
         if (event.type === "done" && event.message.stopReason !== "length"
           && !discardedToolOutputs.has(event.message) && missingRequiredTool(event.message, toolChoice)) {
-          recordExecutionEvidence("model-call-completed", { modelCallId, status: "invalid_tool_choice", response: event.message });
+          recordExecutionEvidence("model-call-completed", { modelCallId, status: "invalid_tool_choice", response: event.message, ...timing() });
           if (retry) {
             recordExecutionEvidence("model-call-retry", { modelCallId, reason: "MODEL_REQUIRED_TOOL_MISSING" });
             for await (const retried of retry()) forward(retried);
@@ -244,7 +261,7 @@ function observeModelStream(model: Model<Api>, modelCallId: string | undefined, 
         }
         if (pendingStart) { forward(pendingStart); pendingStart = undefined; }
         if (event.type === "done" || event.type === "error") recordExecutionEvidence("model-call-completed", {
-          modelCallId, status: event.type, response: event.type === "done" ? event.message : event.error,
+          modelCallId, status: event.type, response: event.type === "done" ? event.message : event.error, ...timing(),
           ...((event.type === "error" || (event.type === "done" && event.message.stopReason === "length")) && lastPartial?.content.length ? { partialOutput: lastPartial } : {}),
         });
         forward(event);
@@ -252,7 +269,7 @@ function observeModelStream(model: Model<Api>, modelCallId: string | undefined, 
     } catch (error) {
       const message = emptyAssistantMessage(model);
       message.stopReason = "error"; message.errorMessage = String(error);
-      recordExecutionEvidence("model-call-completed", { modelCallId, status: "error", response: message, ...(lastPartial?.content.length ? { partialOutput: lastPartial } : {}) });
+      recordExecutionEvidence("model-call-completed", { modelCallId, status: "error", response: message, ...timing(), ...(lastPartial?.content.length ? { partialOutput: lastPartial } : {}) });
       output.push({ type: "error", reason: "error", error: message });
     } finally { output.end(); }
   })();

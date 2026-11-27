@@ -23,7 +23,7 @@ it('keeps the complete source corpus without a model dependency when it fits, an
     const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));
     calls++;
     response.writeHead(200,{'Content-Type':'application/json'});
-    response.end(JSON.stringify({choices:[{finish_reason:'tool_calls',message:{tool_calls:[{id:'selection-'+calls,type:'function',function:{name:body.tools[0].function.name,arguments:JSON.stringify({selectedIndices:[1]})}}]}}]}));
+    response.end(JSON.stringify({choices:[{finish_reason:'tool_calls',message:{tool_calls:[{id:'selection-'+calls,type:'function',function:{name:body.tools[0].function.name,arguments:JSON.stringify({selectedIndices:body.tools[0].function.parameters.properties.selectedIndices.items.maximum===8?[1,3,5,7]:[1]})}}]}}]}));
   });
   server.listen(0,'127.0.0.1');await once(server,'listening');
   try{
@@ -55,7 +55,7 @@ it('keeps the complete source corpus without a model dependency when it fits, an
     expect(JSON.parse(await readFile(complete.tracePath,'utf8'))).toEqual(complete.trace);
     expect(events).toEqual([expect.objectContaining({type:'context-selection',payload:expect.objectContaining({mode:'complete',sourceCount:11,modelCalls:0})})]);
     const selected=await composer.selectTaskContext({bookDir,chapterNumber:2,goal,language:'en',contextBudget:{contextWindowTokens:1001,reservedOutputTokens:1000}});
-    expect(calls).toBe(5);
+    expect(calls).toBe(2);
     expect(selected.selectedContext).toHaveLength(6);
     const completeSources=new Set(complete.contextPackage.selectedContext.map(entry=>entry.source));
     expect(selected.selectedContext.every(entry=>completeSources.has(entry.source))).toBe(true);
@@ -70,7 +70,7 @@ it('keeps the complete source corpus without a model dependency when it fits, an
     // deliver the complete governed context without another selection call.
     const writer=vi.spyOn(WriterAgent.prototype,'writeChapter').mockRejectedValue(Object.assign(new Error('Writing boundary reached'),{code:'WRITER_BOUNDARY'}));
     await expect(new PipelineRunner({projectRoot:root,client,model:'fixture'}).writeChapters(book.id,1,{startChapterNumber:1})).rejects.toMatchObject({code:'WRITER_BOUNDARY'});
-    expect(calls).toBe(5);
+    expect(calls).toBe(2);
     expect(new Set(writer.mock.calls[0]![0].contextPackage?.selectedContext.map(entry=>entry.source))).toEqual(new Set([...completeSources,'story/current_focus.md','story/author_intent.md']));
     const pipelineTrace=JSON.parse(await readFile(join(bookDir,'story/runtime/chapter-0001.trace.json'),'utf8'));
     expect(pipelineTrace.retrieval).toMatchObject({selectionMode:'complete',semanticSelectedIds:[]});

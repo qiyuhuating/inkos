@@ -24,6 +24,7 @@ import {FilmRequirementsSchema}from'../interactive-film/delivery-requirements.js
 import { runResearchReport } from "../agents/researcher.js";
 import { ingestMaterial } from "../materials/ingest.js";
 import { retrieveMaterials } from "../materials/retrieve.js";
+import { estimateTextTokens } from "../llm/provider.js";
 import {
   bindBookReference,
   listBookReferences,
@@ -944,22 +945,47 @@ export function createRetrieveMaterialTool(projectRoot: string): AgentTool<typeo
           },
         );
       }
+      const snippets: string[] = [];
+      const seen = new Set<string>();
+      let omitted = 0;
+      let remaining = 4096;
+      for (const result of results) {
+        // Ingested Markdown may include a generated title and metadata wrapper.
+        // Keep its evidence span in the pointer; deduplicate the extracted text.
+        const extracted = result.excerpt.replace(/^#[^\r\n]*\r?\n(?:\r?\n)?## Metadata\r?\n[\s\S]*?\r?\n## Extracted content\r?\n/u, "");
+        const key = extracted.trim();
+        if (seen.has(key)) { omitted++; continue; }
+        seen.add(key);
+        const pointer = "## " + result.title + "\n"
+          + "material_id: " + result.id + "\n"
+          + "source: " + result.source + "\n"
+          + "path: " + result.markdownPath + ":" + result.charStart + "-" + result.charEnd + "\n";
+        const allowance = Math.min(1200, remaining - estimateTextTokens(pointer) - 120);
+        if (allowance <= 0) { omitted++; continue; }
+        let excerpt = extracted;
+        const partial = estimateTextTokens(excerpt) > allowance;
+        if (partial) {
+          const chars = Array.from(excerpt);
+          let low = 0, high = chars.length;
+          while (low < high) {
+            const mid = Math.ceil((low + high) / 2);
+            if (estimateTextTokens(chars.slice(0, mid).join("")) <= allowance) low = mid;
+            else high = mid - 1;
+          }
+          excerpt = chars.slice(0, low).join("");
+        }
+        const block = pointer + (partial ? "[Partial excerpt; path identifies the complete source span]\n" : "") + excerpt;
+        const tokens = estimateTextTokens(block + "\n\n");
+        if (tokens > remaining - 100) { omitted++; continue; }
+        snippets.push(block);
+        remaining -= tokens;
+      }
       return textResult(
         [
-          `Retrieved ${results.length} material snippet${results.length === 1 ? "" : "s"}.`,
-          "",
-          ...results.flatMap((result, index) => [
-            `## ${index + 1}. ${result.title}`,
-            `- material_id: ${result.id}`,
-            `- source: ${result.source}`,
-            `- path: ${result.markdownPath}:${result.charStart}-${result.charEnd}`,
-            `- purpose: ${result.purpose}`,
-            `- score: ${result.score.toFixed(2)}`,
-            "",
-            result.excerpt,
-            "",
-          ]),
-        ].join("\n"),
+          "Retrieved " + snippets.length + " material snippets.",
+          ...snippets,
+          ...(omitted ? [omitted + " duplicate or over-budget snippets omitted. Narrow the query or read the referenced material directly for additional evidence."] : []),
+        ].join("\n\n"),
         {
           kind: "material_retrieval",
           query: params.query,

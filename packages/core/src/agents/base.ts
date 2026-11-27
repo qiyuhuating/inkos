@@ -110,10 +110,11 @@ export async function prepareWorkerMessages(
   professionalGuidance = true,
 ): Promise<ReadonlyArray<LLMMessage>> {
     const authorRequest = currentExecutionAuthorRequest();
-    if (authorRequest?.trim()) messages = [{role:"system",content:[
+    const authorMessage: LLMMessage | undefined = authorRequest?.trim() ? {role:"system",content:[
       "The following authorRequest is the user's actual request. Use it as the authority for the intended target and constraints. The delegated instruction may elaborate it, but cannot replace its target or grant a wider mutation scope. Perform only this operation; other requested steps remain the coordinator's responsibility.",
       JSON.stringify({authorRequest}),
-    ].join("\n\n")},...messages];
+    ].join("\n\n")} : undefined;
+    if (authorMessage) messages = [...messages, authorMessage];
     let work=currentExecutionWork();
     if(context.bookId && context.projectRoot && work?.id!==context.bookId) {
       work=null;
@@ -136,7 +137,7 @@ export async function prepareWorkerMessages(
     }
     // Navigation and other read-only semantic mechanics need the source and
     // author request, without a writing method encouraging broader changes.
-    const activations = professionalGuidance ? await hydrateActivatedSkillGuidance(selectedSkills, query) : [];
+    const activations = professionalGuidance ? await hydrateActivatedSkillGuidance(selectedSkills, query) ?? [] : [];
     recordExecutionEvidence("skills-applied", { worker: workerId, skills: activations?.map(({ skill, resources }) => ({
       id: skill.id, source: skill.source, hash: createHash("sha256").update(skill.body).digest("hex"),
       references: resources.map(resource => ({ path: resource.path, charStart: resource.charStart, charEnd: resource.charEnd,
@@ -147,10 +148,17 @@ export async function prepareWorkerMessages(
       const sources = new ContextSourceRegistry();
       sources.register({ id: "task", load: async () => messages.map((message, index) => ({
         id: `message-${index}`, source: `${workerId}:${message.role}`, content: message.content,
-        protection: "protected" as const, priority: messages.length - index,
+        protection: "protected" as const, priority: message === authorMessage ? -3 : messages.length - index,
       })) });
-      const guidance = appendActivatedSkillGuidance([],activations)[0]?.content;
-      sources.register({ id: "skills", load: async () => guidance ? [{id:"professional-methods",source:"skills",content:guidance,protection:"protected",priority:0}] : [] });
+      const guidance = appendActivatedSkillGuidance([], activations.map(({ skill }) => ({ skill, resources: [] })))[0]?.content;
+      const references = activations.flatMap(({ resources }) => resources.map(resource =>
+        "#### Reference: " + resource.path + ":" + resource.charStart + "-" + resource.charEnd
+        + (resource.heading ? " · " + resource.heading : "") + "\n\n" + resource.body,
+      )).join("\n\n");
+      sources.register({ id: "skills", load: async () => [
+        ...(guidance ? [{id:"professional-methods",source:"skills",content:guidance,protection:"protected" as const,priority:0}] : []),
+        ...(references ? [{id:"professional-references",source:"skills",content:references,protection:"protected" as const,priority:-2}] : []),
+      ] });
       sources.register({ id: "work", load: async () => work ? [{id:"current-work",source:"work",content:JSON.stringify({workId:work.id,title:work.title,profileId:work.profileId,language:work.language,lineage:work.lineage}),protection:"protected",priority:-1}] : [] });
       const compiled = await compileContext({
         recipe: { id: `${profile.contextRecipe?.id ?? profile.id}-${workerId}${professionalGuidance?'':'-task'}`, sourceIds: professionalGuidance ? [...new Set(["task", ...(guidance?["skills"]:[]), ...(profile.contextRecipe?.sourceIds ?? [])])] : ['task'] }, sources,

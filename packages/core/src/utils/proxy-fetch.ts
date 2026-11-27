@@ -3,6 +3,29 @@ import { ProxyAgent } from "undici";
 type ProxyEnv = Record<string, string | undefined>;
 type FetchInitWithDispatcher = RequestInit & { dispatcher?: unknown };
 
+// Direct fetch uses the process-wide Undici pool. Proxy requests need a
+// shared dispatcher as well; otherwise every model call creates a new pool.
+const proxyDispatchers = new Map<string, ProxyAgent>();
+const MAX_PROXY_DISPATCHERS = 8;
+
+function proxyDispatcher(url: string): ProxyAgent {
+  let dispatcher = proxyDispatchers.get(url);
+  if (dispatcher) {
+    proxyDispatchers.delete(url);
+  } else {
+    dispatcher = new ProxyAgent(url);
+    if (proxyDispatchers.size >= MAX_PROXY_DISPATCHERS) {
+      const oldest = proxyDispatchers.keys().next().value!;
+      const evicted = proxyDispatchers.get(oldest)!;
+      proxyDispatchers.delete(oldest);
+      // Graceful close waits for outstanding requests.
+      void evicted.close().catch(() => undefined);
+    }
+  }
+  proxyDispatchers.set(url, dispatcher);
+  return dispatcher;
+}
+
 export function resolveProxyUrl(explicitProxyUrl?: string, env: ProxyEnv = process.env): string | undefined {
   const candidate = [
     explicitProxyUrl,
@@ -30,7 +53,7 @@ export function buildProxyFetchInit(
   if (!proxyUrl) return init;
   return {
     ...init,
-    dispatcher: new ProxyAgent(proxyUrl),
+    dispatcher: proxyDispatcher(proxyUrl),
   };
 }
 

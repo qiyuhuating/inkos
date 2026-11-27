@@ -7,6 +7,7 @@ import {readArtifactRevision} from '../harness/artifact-reader.js';
 import {currentExecutionBaselineWork} from '../harness/execution-evidence.js';
 import {chapterDocumentBody} from '../utils/chapter-document.js';
 import {changedSourceRegion} from '../utils/source-text.js';
+import { lintChapterStyle } from "../style-linter.js";
 
 export interface AuditResult {
   readonly observations: ReadonlyArray<Observation>;
@@ -71,7 +72,11 @@ export class ContinuityAuditor extends BaseAgent {
         }
       }
     }
-    const userPrompt = JSON.stringify({ chapterNumber,comparison, sources: [...sources].map(([sourceId, content]) => ({ sourceId, numberedLines: numberReviewSource(content) })) });
+    const deterministicFindings = lintChapterStyle(chapterContent);
+    const userPrompt = JSON.stringify({ chapterNumber, comparison,
+      ...(deterministicFindings.length ? { deterministicFindings: deterministicFindings.map(finding => ({ ...finding, paragraph: finding.paragraph + 1 })),
+        deterministicFindingInstruction: "Host flags are candidate issues, not a substitute for evidence. Cite exact chapter source lines and preserve intentional voice." } : {}),
+      sources: [...sources].map(([sourceId, content]) => ({ sourceId, numberedLines: numberReviewSource(content) })) });
 
     const { result, usage } = await this.submitSourcedReview(
       [

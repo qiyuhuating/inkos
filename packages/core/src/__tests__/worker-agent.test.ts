@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Type } from "@sinclair/typebox";
 import { runWorkerAgent, runWorkerAgentTool } from "../agent/worker-agent.js";
-import { BaseAgent, type AgentContext } from "../agents/base.js";
+import { BaseAgent, prepareWorkerMessages, type AgentContext } from "../agents/base.js";
+import { withExecutionEvidence } from "../harness/execution-evidence.js";
 
 const chatCompletionMock = vi.hoisted(() => vi.fn());
 const guardedPiStreamMock = vi.hoisted(() => vi.fn());
@@ -56,6 +57,23 @@ class TwoStepWorker extends BaseAgent {
     await this.chat([{ role: "user", content: "第二步" }]);
   }
 }
+
+it("keeps stable worker instructions before changing author requests", async () => {
+  const prepare = (request: string) => withExecutionEvidence(
+    () => {},
+    () => prepareWorkerMessages({ client: client() }, [
+      { role: "system", content: "Stable writing protocol." },
+      { role: "user", content: request },
+    ], 128, "writer", false),
+    undefined, undefined, request,
+  );
+  const first = await prepare("Write chapter one.");
+  const second = await prepare("Write chapter two.");
+  expect(first.filter(message => message.role === "system")[0]?.content).toBe("Stable writing protocol.");
+  expect(second.filter(message => message.role === "system")[0]?.content).toBe("Stable writing protocol.");
+  expect(first.find(message => message.content.includes("authorRequest"))?.content).toContain("Write chapter one.");
+  expect(second.find(message => message.content.includes("authorRequest"))?.content).toContain("Write chapter two.");
+});
 
 describe("Pi worker harness", () => {
   beforeEach(() => {

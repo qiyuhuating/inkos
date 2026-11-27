@@ -37,6 +37,8 @@ export class LocalSearchIndex {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA synchronous = NORMAL");
+    this.db.exec("PRAGMA temp_store = MEMORY");
+    this.db.exec("PRAGMA busy_timeout = 5000");
     this.db.exec("PRAGMA foreign_keys = ON");
     this.initializeSchema();
   }
@@ -44,10 +46,6 @@ export class LocalSearchIndex {
   replaceScope(scope: string, documents: ReadonlyArray<SearchDocument>): void {
     const normalized = documents.map((document) => normalizeDocument(document, scope));
     const keepIds = new Set(normalized.map((document) => document.id));
-    const existing = this.db.prepare(
-      "SELECT document_id AS id, content_hash AS contentHash FROM retrieval_documents WHERE scope = ?",
-    ).all(scope) as unknown as ReadonlyArray<{ readonly id: string; readonly contentHash: string }>;
-    const existingHashes = new Map(existing.map((row) => [row.id, row.contentHash]));
     const upsert = this.db.prepare(`
       INSERT INTO retrieval_documents (
         document_id, scope, kind, source, title, body,
@@ -70,6 +68,10 @@ export class LocalSearchIndex {
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const existing = this.db.prepare(
+        "SELECT document_id AS id, content_hash AS contentHash FROM retrieval_documents WHERE scope = ?",
+      ).all(scope) as unknown as ReadonlyArray<{ readonly id: string; readonly contentHash: string }>;
+      const existingHashes = new Map(existing.map((row) => [row.id, row.contentHash]));
       for (const document of normalized) {
         if (existingHashes.get(document.id) === document.contentHash) continue;
         const titleTokens = tokenizeSearchText(document.title).join(" ");

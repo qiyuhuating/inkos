@@ -62,56 +62,57 @@ export async function retrieveMemorySelection(params: {
   readonly goal: string;
   readonly semanticSelector?: MemorySemanticSelector;
 }): Promise<MemorySelection> {
+  const prepared = await prepareMemorySelection(params);
+  return prepared(params.semanticSelector);
+}
+
+/** Build one immutable candidate corpus; semantic selection can be repeated without rereading or indexing. */
+export async function prepareMemorySelection(params: {
+  readonly bookDir: string;
+  readonly chapterNumber: number;
+  readonly goal: string;
+  readonly state?: { readonly hooks: { readonly hooks: readonly HookRecord[] }; readonly chapterSummaries: { readonly rows: readonly ChapterSummaryRow[] } };
+}): Promise<(selector?: MemorySemanticSelector) => Promise<MemorySelection>> {
   const storyDir = join(params.bookDir, "story");
   const stateDir = join(storyDir, "state");
-  const [
-    volumeSummariesMarkdown,
-    structuredHooks,
-    structuredSummaries,
-  ] = await Promise.all([
+  const [volumeSummariesMarkdown, structuredHooks, structuredSummaries] = await Promise.all([
     readOptionalText(join(storyDir, "volume_summaries.md")),
-    readStructuredState(join(stateDir, "hooks.json"), HooksStateSchema),
-    readStructuredState(join(stateDir, "chapter_summaries.json"), ChapterSummariesStateSchema),
+    params.state?.hooks ?? readStructuredState(join(stateDir, "hooks.json"), HooksStateSchema),
+    params.state?.chapterSummaries ?? readStructuredState(join(stateDir, "chapter_summaries.json"), ChapterSummariesStateSchema),
   ]);
   const retrievalQuery = params.goal;
   const parsedVolumeSummaries = parseVolumeSummariesMarkdown(volumeSummariesMarkdown);
-  // Structured hook state is authoritative; SQLite remains a rebuildable
-  // retrieval projection.
-  const hooks = structuredHooks.hooks;
-  // Every unresolved hook remains searchable canon. The semantic selector
-  // decides relevance for the current task; status does not imply urgency.
-  const searchableHooks = hooks.filter((hook) => hook.status !== "resolved" && hook.status !== "superseded");
-
+  const searchableHooks = structuredHooks.hooks.filter((hook) => hook.status !== "resolved" && hook.status !== "superseded");
   const summaries = structuredSummaries.rows;
   const dbPath = join(storyDir, "memory.db");
+  const documents = buildMemorySearchDocuments({
+    summaries,
+    hooks: searchableHooks,
+    volumeSummaries: parsedVolumeSummaries,
+  });
   const searchIndex = new LocalSearchIndex(dbPath);
+  let hits: SearchHit[];
   try {
-    const documents = buildMemorySearchDocuments({
-      summaries,
-      hooks: searchableHooks,
-      volumeSummaries: parsedVolumeSummaries,
-    });
     searchIndex.replaceScope(STORY_MEMORY_SCOPE, documents);
-    const hits = searchIndex.search(retrievalQuery, {
-      scope: STORY_MEMORY_SCOPE,
-      limit: 200,
-    });
-    const hitIds = new Set(hits.map((hit) => hit.id));
-    const allCandidates: SearchHit[] = [
-      ...hits,
-      ...documents.filter((document) => !hitIds.has(document.id)).map((document) => ({
-        ...document,
-        score: -1_000_000,
-      })),
-    ];
+    hits = searchIndex.search(retrievalQuery, { scope: STORY_MEMORY_SCOPE, limit: 200 });
+  } finally {
+    searchIndex.close();
+  }
+  const hitIds = new Set(hits.map((hit) => hit.id));
+  const allCandidates: SearchHit[] = [
+    ...hits,
+    ...documents.filter((document) => !hitIds.has(document.id)).map((document) => ({
+      ...document, score: -1_000_000,
+    })),
+  ];
+  return async (selector) => {
     const semanticSelection = await selectSemanticCandidateIds({
-      selector: params.semanticSelector,
+      selector,
       chapterNumber: params.chapterNumber,
       query: retrievalQuery,
       hits: allCandidates,
     });
     const selectedIds = new Set(semanticSelection.selectedIds);
-
     return {
       summaries: selectSummariesById(summaries, params.chapterNumber, selectedIds),
       lookupSummaries: summaries,
@@ -127,9 +128,7 @@ export async function retrieveMemorySelection(params: {
         semanticSelectedIds: semanticSelection.selectedIds,
       },
     };
-  } finally {
-    searchIndex.close();
-  }
+  };
 }
 
 const STORY_MEMORY_SCOPE = "story-memory";

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ingestMaterial } from "../materials/ingest.js";
 import { retrieveMaterials } from "../materials/retrieve.js";
+import { createRetrieveMaterialTool } from "../agent/agent-tools.js";
+import { estimateTextTokens } from "../llm/provider.js";
 
 describe("material retrieval", () => {
   let root: string;
@@ -51,6 +53,22 @@ describe("material retrieval", () => {
     expect(results[0]?.markdownPath).toMatch(/^\.inkos\/materials\//);
     expect(results[0]?.charStart).toBeGreaterThanOrEqual(0);
     expect(results[0]?.charEnd).toBeGreaterThan(results[0]?.charStart ?? 0);
+  });
+
+  it("bounds model-visible retrieval without losing the full host evidence", async () => {
+    const excerpt = "冷库账页签收单".repeat(2000);
+    await writeFile(join(root, "first.md"), excerpt, "utf8");
+    await writeFile(join(root, "second.md"), excerpt, "utf8");
+    await ingestMaterial(root, { sourceKind: "file", filePath: "first.md", purpose: "research" });
+    await ingestMaterial(root, { sourceKind: "file", filePath: "second.md", purpose: "research" });
+    const result = await createRetrieveMaterialTool(root).execute("fixture", { query: "冷库 账页 签收单", limit: 5 });
+    const text = result.content.map(part => part.type === "text" ? part.text : "").join("\n");
+    expect(estimateTextTokens(text)).toBeLessThanOrEqual(4096);
+    expect(text).toContain("Partial excerpt");
+    expect(text).toContain("path: .inkos/materials/");
+    expect(text).toContain("1 duplicate or over-budget");
+    expect((result.details as { results: { excerpt: string }[] }).results).toHaveLength(2);
+    expect((result.details as { results: { excerpt: string }[] }).results[0]?.excerpt).toContain(excerpt);
   });
 
   it("can filter retrieval by material purpose", async () => {

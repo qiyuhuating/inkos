@@ -12,7 +12,7 @@ import {
 } from "../models/input-governance.js";
 import type { PlanChapterOutput } from "./planner.js";
 import {
-  retrieveMemorySelection,
+  prepareMemorySelection,
   type MemorySelection,
   type MemoryRetrievalTrace,
   type MemorySemanticSelectionRequest,
@@ -82,6 +82,7 @@ export interface OutlineSectionSelectionRequest {
 }
 
 export type OutlineSectionSelector = (request: OutlineSectionSelectionRequest) => Promise<ReadonlyArray<string>>;
+type OutlineBatchSelector = (requests: readonly OutlineSectionSelectionRequest[]) => Promise<ReadonlyArray<ReadonlyArray<string>>>;
 
 export interface ComposeChapterOutput {
   readonly contextPackage: ContextPackage;
@@ -322,10 +323,13 @@ export class ComposerAgent extends BaseAgent {
     };
     if (contextBudget && !input.outlineSectionSelector && !input.memorySemanticSelector) {
       const reference = await loadReferenceContext(configured);
-      const complete = await this.completeContextWithinBudget(input.bookDir, input.plan, input.book.language, contextBudget, reference.entries);
+      const storyDir = join(input.bookDir, "story");
+      const prepared = await prepareChapterContext(storyDir, input.plan);
+      const complete = await this.completeContextWithinBudget(storyDir, input.plan, input.book.language, contextBudget, prepared, reference.entries);
       if (complete) return persistComposedContext(configured, complete, reference);
-      const selected = await collectSelectedContext(join(input.bookDir, "story"), input.plan, input.book.language,
-        configured.outlineSectionSelector, configured.memorySemanticSelector);
+      const selected = await collectSelectedContext(storyDir, input.plan, input.book.language,
+        configured.outlineSectionSelector, configured.memorySemanticSelector, prepared,
+        requests => this.selectOutlineBatch(requests));
       return persistComposedContext(configured, selected, reference);
     }
     return composeGovernedChapter(configured);
@@ -351,13 +355,17 @@ export class ComposerAgent extends BaseAgent {
       plannerInputs: [],
     };
     const budget = input.contextBudget ?? contextBudgetFromClient(this.ctx.client);
-    const complete = budget ? await this.completeContextWithinBudget(input.bookDir, plan, input.language, budget) : undefined;
+    const storyDir = join(input.bookDir, "story");
+    const prepared = await prepareChapterContext(storyDir, plan);
+    const complete = budget ? await this.completeContextWithinBudget(storyDir, plan, input.language, budget, prepared) : undefined;
     const selected = complete ?? await collectSelectedContext(
-      join(input.bookDir, "story"),
+      storyDir,
       plan,
       input.language,
       (request) => this.selectOutlineSections(request),
       (request) => this.selectMemoryCandidates(request),
+      prepared,
+      requests => this.selectOutlineBatch(requests),
     );
     return ContextPackageSchema.parse({
       chapter: input.chapterNumber,
@@ -366,16 +374,17 @@ export class ComposerAgent extends BaseAgent {
   }
 
   private async completeContextWithinBudget(
-    bookDir: string, plan: PlanChapterOutput, language: "zh" | "en", budget: ContextBudget,
+    storyDir: string, plan: PlanChapterOutput, language: "zh" | "en", budget: ContextBudget,
+    prepared: Awaited<ReturnType<typeof prepareChapterContext>>,
     references: ContextPackage["selectedContext"] = [],
   ): Promise<Awaited<ReturnType<typeof collectSelectedContext>> | undefined> {
     // Reserve the other half for the consumer's instructions, methods, current
     // manuscript and protocol. This is a context allocation, not a prose limit.
     const contextAllowance = Math.floor((budget.contextWindowTokens - Math.max(0, budget.reservedOutputTokens)) / 2);
     if (contextAllowance <= 0) return undefined;
-    const complete = await collectSelectedContext(join(bookDir, "story"), plan, language,
+    const complete = await collectSelectedContext(storyDir, plan, language,
       async request => request.candidates.map(candidate => candidate.source),
-      async request => request.candidates.map(candidate => candidate.id));
+      async request => request.candidates.map(candidate => candidate.id), prepared);
     const tokens = estimateSelectedContextTokens([...complete.entries, ...references]);
     if (tokens > contextAllowance) return undefined;
     recordExecutionEvidence("context-selection", {scope:"story_context",mode:"complete",estimatedTokens:tokens,budgetTokens:contextAllowance,
@@ -414,6 +423,31 @@ export class ComposerAgent extends BaseAgent {
       }
     }
     return [...selected];
+  }
+
+  private async selectOutlineBatch(requests: readonly OutlineSectionSelectionRequest[]): Promise<ReadonlyArray<ReadonlyArray<string>>> {
+    const multiple = requests.filter(request => request.candidates.length > 1);
+    if (multiple.length < 2) {
+      const result: ReadonlyArray<string>[] = [];
+      for (const request of requests) result.push(await this.selectOutlineSections(request));
+      return result;
+    }
+    const candidates = multiple.flatMap(request => request.candidates.map(candidate => ({
+      group: request.kind, source: candidate.source, heading: candidate.heading, excerpt: candidate.excerpt,
+    })));
+    const prompt = JSON.stringify({ goal: multiple[0]!.goal, chapter: multiple[0]!.chapterNumber, candidates });
+    const budget = semanticInputBudget(this.ctx.client, { reservedOutputTokens: 2048, promptOverheadTokens: 2048 });
+    if (budget === undefined || estimateTextTokens(prompt) + estimateTextTokens(JSON.stringify(candidates.map(candidate => candidate.source))) > budget) {
+      const result: ReadonlyArray<string>[] = [];
+      for (const request of requests) result.push(await this.selectOutlineSections(request));
+      return result;
+    }
+    const selected = new Set(await this.submitSelectedSources([
+      { role: "system", content: "Select relevant entries across each group of canon, current state, and role cards for the chapter. Evaluate each group independently; preserve needed constraints and select by exact candidate number." },
+      { role: "user", content: prompt },
+    ], new Set(candidates.map(candidate => candidate.source)), 2048));
+    return requests.map(request => request.candidates.filter(candidate =>
+      request.candidates.length === 1 || selected.has(candidate.source)).map(candidate => candidate.source));
   }
 
   async selectOutlineSections(request: OutlineSectionSelectionRequest): Promise<ReadonlyArray<string>> {
@@ -588,17 +622,43 @@ export function contextBudgetFromClient(client: LLMClient): ContextBudget | unde
   };
 }
 
+async function prepareChapterContext(storyDir: string, plan: PlanChapterOutput) {
+  const [entries, canonEntries, snapshot, storyFrame, volumeMap, roleCandidates] = await Promise.all([
+    Promise.all([
+      maybeContextSource(storyDir, "current_focus.md", "Current task focus for this chapter.", "protected"),
+      maybeContextSource(storyDir, "author_intent.md", "User's long-term authorial intent and direction — binding, overrides model defaults.", "protected"),
+      maybeContextSource(storyDir, "style_guide.md", "User-approved style guidance for this Work.", "protected"),
+    ]),
+    Promise.all([
+      maybeContextSource(storyDir, "parent_canon.md", "Preserve parent canon constraints for governed continuation or fanfic writing.", "protected"),
+      maybeContextSource(storyDir, "fanfic_canon.md", "Preserve extracted fanfic canon constraints for governed writing.", "protected"),
+    ]),
+    loadRuntimeStateSnapshot(dirname(storyDir)),
+    readFileOrDefault(join(storyDir, "outline/story_frame.md")),
+    readFileOrDefault(join(storyDir, "outline/volume_map.md")),
+    readRoleCardCandidates(storyDir),
+  ]);
+  const memory = await prepareMemorySelection({
+    bookDir: dirname(storyDir),
+    chapterNumber: plan.intent.chapter,
+    goal: deriveRetrievalHints(plan).join("\n"),
+    state: snapshot,
+  });
+  return { entries, canonEntries, snapshot, storyFrame, volumeMap, roleCandidates, memory };
+}
+
 async function collectSelectedContext(
   storyDir: string,
   plan: PlanChapterOutput,
   language: "zh" | "en",
   outlineSectionSelector?: OutlineSectionSelector,
   memorySemanticSelector?: MemorySemanticSelector,
+  prepared?: Awaited<ReturnType<typeof prepareChapterContext>>,
+  batchSelector?: OutlineBatchSelector,
 ): Promise<{
   readonly entries: ContextPackage["selectedContext"];
   readonly retrievalTrace: MemoryRetrievalTrace;
 }> {
-    const retrievalHints = deriveRetrievalHints(plan);
     const memoBodyExcerpt = plan.memo.body.trim();
     const chapterMemoEntry = memoBodyExcerpt.length > 0
       ? [{
@@ -617,59 +677,47 @@ async function collectSelectedContext(
           protection: "protected" as const,
         }];
 
-    const [entries, canonEntries, snapshot, storyFrame, volumeMap, roleCandidates] = await Promise.all([
-      Promise.all([
-        maybeContextSource(storyDir, "current_focus.md", "Current task focus for this chapter.", "protected"),
-        maybeContextSource(storyDir, "author_intent.md", "User's long-term authorial intent and direction — binding, overrides model defaults.", "protected"),
-        maybeContextSource(storyDir, "style_guide.md", "User-approved style guidance for this Work.", "protected"),
-      ]),
-      Promise.all([
-        maybeContextSource(storyDir, "parent_canon.md", "Preserve parent canon constraints for governed continuation or fanfic writing.", "protected"),
-        maybeContextSource(storyDir, "fanfic_canon.md", "Preserve extracted fanfic canon constraints for governed writing.", "protected"),
-      ]),
-      loadRuntimeStateSnapshot(dirname(storyDir)),
-      readFileOrDefault(join(storyDir, "outline/story_frame.md")),
-      readFileOrDefault(join(storyDir, "outline/volume_map.md")),
-      readRoleCardCandidates(storyDir),
-    ]);
-    const currentStateEntries = await selectCurrentStateEntries({
-      snapshot,
-      plan,
-      language,
-      selector: outlineSectionSelector,
-    });
-    const outlineEntries = [
-      ...await maybeOutlineSectionSources(
-        storyFrame,
-        "outline/story_frame.md",
-        "Preserve canon constraints referenced by the active chapter brief or hard constraints.",
-        plan,
-        "story-frame",
-        language,
-        outlineSectionSelector,
-      ),
-      ...await maybeOutlineSectionSources(
-        volumeMap,
-        "outline/volume_map.md",
-        "Anchor the default planning node for this chapter.",
-        plan,
-        "volume-map",
-        language,
-        outlineSectionSelector,
-      ),
-    ];
-    const roleEntries = await selectRoleCardEntries({
-      candidates: roleCandidates,
-      plan,
-      language,
-      selector: outlineSectionSelector,
-    });
-    const memorySelection = await retrieveMemorySelection({
-      bookDir: dirname(storyDir),
-      chapterNumber: plan.intent.chapter,
-      goal: retrievalHints.join("\n"),
-      semanticSelector: memorySemanticSelector,
-    });
+    const { entries, canonEntries, snapshot, storyFrame, volumeMap, roleCandidates, memory } =
+      prepared ?? await prepareChapterContext(storyDir, plan);
+    const groups = [
+      { kind: "current-state" as const, fileName: "state/current_state.json",
+        reason: "Current-state fact selected for the current chapter task.", candidates: currentStateCandidates(snapshot) },
+      { kind: "story-frame" as const, fileName: "outline/story_frame.md",
+        reason: "Preserve canon constraints referenced by the active chapter brief or hard constraints.",
+        candidates: outlineCandidates("outline/story_frame.md", storyFrame) },
+      { kind: "volume-map" as const, fileName: "outline/volume_map.md",
+        reason: "Anchor the default planning node for this chapter.",
+        candidates: outlineCandidates("outline/volume_map.md", volumeMap) },
+      { kind: "role-card" as const, fileName: "roles",
+        reason: "Role canon selected for the current chapter task.", candidates: roleCandidates },
+    ].filter(group => group.candidates.length > 0);
+    const requests = groups.map(({ kind, fileName, candidates }) => ({
+      kind, fileName, candidates, language, chapterNumber: plan.intent.chapter,
+      goal: [plan.intent.goal, plan.memo.body].filter(Boolean).join("\n"), outlineNode: "",
+    }));
+    if (requests.length && !batchSelector && !outlineSectionSelector) throw new Error("Outline semantic selector is required.");
+    let selected: ReadonlyArray<ReadonlyArray<string>>;
+    if (batchSelector) {
+      selected = await batchSelector(requests);
+    } else {
+      const sequential: ReadonlyArray<string>[] = [];
+      for (const request of requests) sequential.push(await outlineSectionSelector!(request));
+      selected = sequential;
+    }
+    const selectedGroups = new Map(groups.map((group, index) => {
+      const ids = new Set(selected[index] ?? []);
+      const known = new Set(group.candidates.map(candidate => candidate.source));
+      for (const source of ids) {
+        if (!known.has(source)) throw new Error("Outline selector returned an unknown source: " + source);
+      }
+      return [group.kind, dedupeBySource(group.candidates.filter(candidate => ids.has(candidate.source)).map(candidate => ({
+        source: candidate.source, reason: group.reason, excerpt: candidate.excerpt, protection: "protected" as const,
+      })))] as const;
+    }));
+    const currentStateEntries = selectedGroups.get("current-state") ?? [];
+    const outlineEntries = [...(selectedGroups.get("story-frame") ?? []), ...(selectedGroups.get("volume-map") ?? [])];
+    const roleEntries = selectedGroups.get("role-card") ?? [];
+    const memorySelection = await memory(memorySemanticSelector);
     const referencedHookEntries = await buildReferencedHookEntries(
       plan,
       memorySelection.lookupHooks,
@@ -717,13 +765,8 @@ async function collectSelectedContext(
     };
 }
 
-async function selectCurrentStateEntries(params: {
-  readonly snapshot: Awaited<ReturnType<typeof loadRuntimeStateSnapshot>>;
-  readonly plan: PlanChapterOutput;
-  readonly language: "zh" | "en";
-  readonly selector?: OutlineSectionSelector;
-}): Promise<ContextPackage["selectedContext"]> {
-  const candidates = params.snapshot.currentState.facts.map((fact, index) => ({
+function currentStateCandidates(snapshot: Awaited<ReturnType<typeof loadRuntimeStateSnapshot>>) {
+  return snapshot.currentState.facts.map((fact, index) => ({
     source: `runtime/current_state#${index + 1}-${slugifyAnchor(`${fact.subject}-${fact.predicate}`)}`,
     heading: `${fact.subject} / ${fact.predicate}`,
     excerpt: [
@@ -733,27 +776,6 @@ async function selectCurrentStateEntries(params: {
       `validFromChapter: ${fact.validFromChapter}`,
       fact.validUntilChapter === null ? "validUntilChapter: current" : `validUntilChapter: ${fact.validUntilChapter}`,
     ].join("\n"),
-  }));
-  if (candidates.length === 0) return [];
-  if (!params.selector) throw new Error("Current-state semantic selector is required.");
-  const selected = new Set(await params.selector({
-    fileName: "state/current_state.json",
-    kind: "current-state",
-    chapterNumber: params.plan.intent.chapter,
-    goal: [params.plan.intent.goal, params.plan.memo.body].filter(Boolean).join("\n"),
-    outlineNode: "",
-    language: params.language,
-    candidates,
-  }));
-  const known = new Set(candidates.map((candidate) => candidate.source));
-  for (const source of selected) {
-    if (!known.has(source)) throw new Error(`Current-state selector returned an unknown source: ${source}`);
-  }
-  return candidates.filter((candidate) => selected.has(candidate.source)).map((candidate) => ({
-    source: candidate.source,
-    reason: "Current-state fact selected for the current chapter task.",
-    excerpt: candidate.excerpt,
-    protection: "protected" as const,
   }));
 }
 
@@ -779,36 +801,6 @@ async function readRoleCardCandidates(storyDir: string): Promise<OutlineSectionS
     }))));
   }
   return candidates;
-}
-
-async function selectRoleCardEntries(params: {
-  readonly candidates: OutlineSectionSelectionRequest["candidates"];
-  readonly plan: PlanChapterOutput;
-  readonly language: "zh" | "en";
-  readonly selector?: OutlineSectionSelector;
-}): Promise<ContextPackage["selectedContext"]> {
-  const candidates = params.candidates;
-  if (candidates.length === 0) return [];
-  if (!params.selector) throw new Error("Role-card semantic selector is required.");
-  const selected = new Set(await params.selector({
-    fileName: "roles",
-    kind: "role-card",
-    chapterNumber: params.plan.intent.chapter,
-    goal: [params.plan.intent.goal, params.plan.memo.body].filter(Boolean).join("\n"),
-    outlineNode: "",
-    language: params.language,
-    candidates,
-  }));
-  const knownSources = new Set(candidates.map((candidate) => candidate.source));
-  for (const source of selected) {
-    if (!knownSources.has(source)) throw new Error(`Role-card selector returned an unknown source: ${source}`);
-  }
-  return candidates.filter((candidate) => selected.has(candidate.source)).map((candidate) => ({
-    source: candidate.source,
-    reason: "Role canon selected for the current chapter task.",
-    excerpt: candidate.excerpt,
-    protection: "protected" as const,
-  }));
 }
 
 function deriveRetrievalHints(plan: PlanChapterOutput): string[] {
@@ -897,70 +889,20 @@ async function maybeContextSource(
     };
 }
 
-async function maybeOutlineSectionSources(
-  content: string,
-  fileName: "outline/story_frame.md" | "outline/volume_map.md",
-  reason: string,
-  plan: PlanChapterOutput,
-  kind: "story-frame" | "volume-map",
-  language: "zh" | "en",
-  outlineSectionSelector?: OutlineSectionSelector,
-): Promise<ContextPackage["selectedContext"]> {
-    if (!content) return [];
-
-    return await selectOutlineSectionEntries({
-      fileName,
-      content,
-      reason,
-      plan,
-      kind,
-      language,
-      outlineSectionSelector,
-    });
-}
-
-async function selectOutlineSectionEntries(params: {
-  readonly fileName: string;
-  readonly content: string;
-  readonly reason: string;
-  readonly plan: PlanChapterOutput;
-  readonly kind: "story-frame" | "volume-map";
-  readonly language: "zh" | "en";
-  readonly outlineSectionSelector?: OutlineSectionSelector;
-}): Promise<ContextPackage["selectedContext"]> {
-  const sections = splitMarkdownSections(params.content);
-  const candidates = sections.length > 0
+function outlineCandidates(fileName: string, content: string): OutlineSectionSelectionRequest["candidates"] {
+  if (!content) return [];
+  const sections = splitMarkdownSections(content);
+  return sections.length > 0
     ? sections.map((section) => ({
-      source: `story/${params.fileName}#${slugifyAnchor(section.heading)}`,
+      source: `story/${fileName}#${slugifyAnchor(section.heading)}`,
       heading: section.heading,
       excerpt: section.raw.trim(),
     }))
     : [{
-      source: `story/${params.fileName}#document`,
-      heading: params.fileName,
-      excerpt: params.content.trim(),
+      source: `story/${fileName}#document`,
+      heading: fileName,
+      excerpt: content.trim(),
     }];
-  if (!params.outlineSectionSelector) throw new Error("Outline semantic selector is required.");
-  const selectedSources = await params.outlineSectionSelector({
-    fileName: params.fileName,
-    kind: params.kind,
-    chapterNumber: params.plan.intent.chapter,
-    goal: [params.plan.intent.goal, params.plan.memo.body].filter(Boolean).join("\n"),
-    outlineNode: "",
-    language: params.language,
-    candidates,
-  });
-  const selectedSourceSet = new Set(selectedSources);
-  const knownSources = new Set(candidates.map((candidate) => candidate.source));
-  for (const source of selectedSourceSet) {
-    if (!knownSources.has(source)) throw new Error(`Outline selector returned an unknown source: ${source}`);
-  }
-  return dedupeBySource(candidates.filter((candidate) => selectedSourceSet.has(candidate.source)).map((candidate) => ({
-      source: candidate.source,
-      reason: params.reason,
-      excerpt: candidate.excerpt,
-      protection: "protected" as const,
-    })));
 }
 
 interface MarkdownSection {

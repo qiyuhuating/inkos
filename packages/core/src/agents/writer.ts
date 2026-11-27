@@ -33,6 +33,10 @@ import {
 } from "../state/state-projections.js";
 
 
+const STABLE_WRITER_CONTEXT_SOURCES = new Set([
+  "story/author_intent.md", "story/parent_canon.md", "story/fanfic_canon.md",
+]);
+
 export interface WriteChapterInput {
   readonly book: BookConfig;
   readonly bookDir: string;
@@ -117,11 +121,15 @@ export class WriterAgent extends BaseAgent {
       throw new Error("Writer requires governed chapter intent, memo, and context package.");
     }
     // ── Phase 1: Creative writing (temperature 0.7) ──
-    const creativeSystemPrompt = buildWriterSystemPrompt(
-      book, bookRules, bookRulesBody, styleGuide,
-      resolvedLanguage,
-      resolvedLengthSpec,
-    );
+    const stableContext = input.contextPackage.selectedContext.filter(entry =>
+      entry.protection === "protected" && STABLE_WRITER_CONTEXT_SOURCES.has(entry.source));
+    const creativeSystemPrompt = [
+      buildWriterSystemPrompt(book, bookRules, bookRulesBody, styleGuide, resolvedLanguage, resolvedLengthSpec),
+      stableContext.length ? (resolvedLanguage === "en"
+        ? "## Durable user direction and canon (binding; follow the latest explicit user correction)"
+        : "## 持久作者方向与正典（必须遵循；以用户最新明确修正为准）")
+        + "\n" + renderNarrativeSelectedContext(stableContext, resolvedLanguage) : "",
+    ].filter(Boolean).join("\n\n");
 
     const creativeUserPrompt = this.buildGovernedUserPrompt({
       chapterNumber,
@@ -501,13 +509,10 @@ export class WriterAgent extends BaseAgent {
     // The user's steering docs (author_intent = long-term direction, current_focus =
     // short-term focus) must land as a prominent, binding block near the top — not
     // buried among generic "evidence" entries where the model treats them as optional.
-    const DIRECTION_SOURCES = new Set(["story/author_intent.md", "story/current_focus.md"]);
-    const directionEntries = params.contextPackage.selectedContext.filter((entry) =>
-      DIRECTION_SOURCES.has(entry.source),
-    );
-    const otherEntries = params.contextPackage.selectedContext.filter((entry) =>
-      !DIRECTION_SOURCES.has(entry.source),
-    );
+    const dynamicEntries = params.contextPackage.selectedContext.filter(entry =>
+      entry.protection !== "protected" || !STABLE_WRITER_CONTEXT_SOURCES.has(entry.source));
+    const directionEntries = dynamicEntries.filter(entry => entry.source === "story/current_focus.md" || entry.source === "story/author_intent.md");
+    const otherEntries = dynamicEntries.filter(entry => !directionEntries.includes(entry));
     const contextSections = renderNarrativeSelectedContext(otherEntries, language);
     const userDirectionBlock = directionEntries.length > 0
       ? (language === "en"

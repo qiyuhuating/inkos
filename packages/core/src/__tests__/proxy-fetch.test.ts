@@ -58,6 +58,17 @@ describe("proxy fetch helpers", () => {
     );
   });
 
+  it("reuses one dispatcher for repeated requests to the same proxy", async () => {
+    const { fetchWithProxy } = await import("../utils/proxy-fetch.js");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const url = "http://reuse-proxy:9910";
+    await fetchWithProxy("https://api.example/v1/models", {}, url, {});
+    await fetchWithProxy("https://api.example/v1/chat/completions", {}, url, {});
+    expect(proxyAgentMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![1].dispatcher).toBe(fetchMock.mock.calls[1]![1].dispatcher);
+  });
+
   it("does not attach a dispatcher when no proxy is configured", async () => {
     const { fetchWithProxy, resolveProxyUrl } = await import("../utils/proxy-fetch.js");
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
