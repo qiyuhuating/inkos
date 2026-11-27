@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { UserMessage } from "@mariozechner/pi-ai";
-import { estimateTextTokens } from "../llm/provider.js";
+import type { Message, UserMessage } from "@mariozechner/pi-ai";
+import { estimatePiContextTokens, estimateTextTokens } from "../llm/provider.js";
 import type { ContextCompressionCallback } from "../models/context-compression.js";
 import {
   compileContext,
@@ -12,6 +12,7 @@ import {
 } from "./context-compiler.js";
 import type { WorkManifest, WorkProfile } from "./contracts.js";
 import { loadWorkManifest } from "./work-store.js";
+import type { ConversationCheckpoint, ConversationCheckpointStore } from "./conversation-checkpoint.js";
 import {executionProgress} from './execution-progress.js';
 
 export interface ConversationCompactionRequest {
@@ -33,6 +34,8 @@ export function createHarnessContextTransform(input: {
   readonly onContextCompression?: ContextCompressionCallback;
   /** Pi passes completed, immutable messages at the transport boundary. */
   readonly immutableCompletedMessages?: boolean;
+  readonly checkpoint?: ConversationCheckpointStore;
+  readonly projectCompletedHistory?: (messages: AgentMessage[]) => AgentMessage[];
 }): (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]> {
   const sources = new ContextSourceRegistry();
   sources.register({
@@ -69,11 +72,20 @@ export function createHarnessContextTransform(input: {
 
   const metrics = new MessageMetrics(input.immutableCompletedMessages === true);
   const estimateAgentMessages = (messages: readonly AgentMessage[]) => metrics.estimate(messages);
-  let cached: {count:number;digest:string;summary:string} | undefined;
+  let cached: ConversationCheckpoint | undefined;
+  let stableCached: ConversationCheckpoint | undefined;
+  let checkpointLoaded = false;
+  let projection: {source: AgentMessage[]; messages: AgentMessage[]} | undefined;
   return async (messages, signal) => {
     const lastUserIndex = findLastUserIndex(messages);
-    let historicalMessages = lastUserIndex > 0 ? messages.slice(0, lastUserIndex) : [];
-    let protectedTail = lastUserIndex >= 0 ? messages.slice(lastUserIndex) : messages;
+    const sourceHistory = lastUserIndex > 0 ? messages.slice(0, lastUserIndex) : [];
+    if (!input.immutableCompletedMessages || !projection || projection.source.length !== sourceHistory.length || sourceHistory.some((message,index)=>message!==projection!.source[index])) {
+      projection = {source:sourceHistory,messages:input.projectCompletedHistory?.(sourceHistory) ?? sourceHistory};
+    }
+    const completedHistory = projection.messages;
+    let historicalMessages = completedHistory;
+    const originalTail = lastUserIndex >= 0 ? messages.slice(lastUserIndex) : messages;
+    let protectedTail = originalTail;
     // Completed reads in the current tool loop can exceed a model window even
     // with a short user request. Preserve the request; compact the complete
     // closed tool exchanges, keeping their full evidence in the transcript.
@@ -129,7 +141,7 @@ export function createHarnessContextTransform(input: {
     const progress=executionProgress(messages.slice(lastUserIndex>=0?lastUserIndex+1:0),Math.max(100,Math.min(8000,Math.floor(input.budgetTokens*0.6))));
     const progressMessage:UserMessage|undefined=progress?{role:'user',content:`<host_execution_progress>\n${progress}\n</host_execution_progress>`,timestamp:Date.now()}:undefined;
     const withContext = [...(contextMessage ? [contextMessage as AgentMessage] : []),
-      ...(progressMessage ? [progressMessage] : []), ...messages];
+      ...(progressMessage ? [progressMessage] : []), ...completedHistory, ...originalTail];
     if (estimateAgentMessages(withContext) <= input.budgetTokens) return withContext;
 
     if (!input.conversationCompactor || historicalMessages.length === 0) {
@@ -145,11 +157,19 @@ export function createHarnessContextTransform(input: {
     if (summaryBudget <= 0) {
       throw new ProtectedContextOverflowError(workTokens + tailTokens, input.budgetTokens);
     }
-    const extendsCache=cached&&cached.count<=historicalMessages.length&&cached.digest===metrics.digest(historicalMessages,cached.count);
+    if (!checkpointLoaded) {
+      stableCached = await input.checkpoint?.load();
+      cached = stableCached;
+      checkpointLoaded = true;
+    }
+    const matches = (checkpoint: ConversationCheckpoint | undefined): checkpoint is ConversationCheckpoint => Boolean(checkpoint && checkpoint.count<=historicalMessages.length&&checkpoint.digest===metrics.digest(historicalMessages,checkpoint.count));
+    if (!matches(cached)) cached = matches(stableCached) ? stableCached : undefined;
+    const extendsCache=Boolean(cached);
     const delta=extendsCache?historicalMessages.slice(cached!.count):[];
     const cachedTokens=extendsCache?estimateTextTokens(cached!.summary)+estimateAgentMessages(delta):Infinity;
     let summary:string;
     let retainedDelta:AgentMessage[]=[];
+    let nextCheckpoint: ConversationCheckpoint | undefined;
     if(extendsCache&&cachedTokens<summaryBudget*0.7){summary=cached!.summary;retainedDelta=delta;}
     else {
     input.onContextCompression?.({ category: "session_context", phase: "start", sources: ["session transcript"] });
@@ -160,7 +180,7 @@ export function createHarnessContextTransform(input: {
       signal,
     })).trim();
     if (!summary) throw new Error("Conversation compactor returned empty content");
-    cached={count:historicalMessages.length,digest:metrics.digest(historicalMessages,historicalMessages.length),summary};
+    nextCheckpoint={count:historicalMessages.length,digest:metrics.digest(historicalMessages,historicalMessages.length),summary};
     input.onContextCompression?.({ category: "session_context", phase: "end", sources: ["session transcript"] });
     }
     const summaryMessage: UserMessage = {
@@ -178,6 +198,15 @@ export function createHarnessContextTransform(input: {
     const finalTokens = estimateAgentMessages(finalMessages);
     if (finalTokens > input.budgetTokens) {
       throw new Error(`Compacted conversation still exceeds budget: ${finalTokens}/${input.budgetTokens} tokens`);
+    }
+    if (nextCheckpoint) {
+      // Active-loop summaries omit the current user message and thus are not
+      // a prefix of committed history. Never replace a durable checkpoint with one.
+      if (historicalMessages === completedHistory) {
+        await input.checkpoint?.save(nextCheckpoint);
+        stableCached = nextCheckpoint;
+      }
+      cached = nextCheckpoint;
     }
     return finalMessages;
   };
@@ -210,7 +239,9 @@ class MessageMetrics {
     const frame = renderAgentMessage(message);
     let cjk = 0;
     for (let i = 0; i < frame.length; i++) { const code = frame.charCodeAt(i); if (code >= 0x3400 && code <= 0x9fff) cjk++; }
-    const value = { units: frame.length + 3 * cjk, hash: createHash("sha256").update(frame).digest("hex") };
+    const transportUnits = ["user","assistant","toolResult"].includes(message.role)
+      ? 4 * estimatePiContextTokens({messages:[message as Message]}) : 0;
+    const value = { units: Math.max(frame.length + 3 * cjk, transportUnits), hash: createHash("sha256").update(frame).digest("hex") };
     if (this.immutable) this.cache.set(message, value);
     return value;
   }

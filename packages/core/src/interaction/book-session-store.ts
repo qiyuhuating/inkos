@@ -244,6 +244,8 @@ export async function deleteBookSession(
   await rm(transcriptPath(projectRoot, sessionId), { force: true });
   const { ToolResultArchive } = await import("../agent/tool-result-archive.js");
   await new ToolResultArchive(projectRoot, sessionId).remove();
+  const { removeConversationCheckpoint } = await import("../harness/conversation-checkpoint.js");
+  await removeConversationCheckpoint(projectRoot, sessionId);
 }
 
 export async function bindBookSessionToBook(

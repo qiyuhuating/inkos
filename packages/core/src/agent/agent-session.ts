@@ -25,6 +25,7 @@ import { confirmedCapabilityBinding, buildProductionCapabilityRegistry } from ".
 import { createBuiltInWorkProfileRegistry } from "../harness/builtin-profiles.js";
 import { createCapabilityPiTools, capabilityActionId, capabilityToolName, renderActionResultForAgent } from "../harness/pi-tools.js";
 import { createHarnessContextTransform } from "../harness/agent-context.js";
+import { ConversationCheckpointStore } from "../harness/conversation-checkpoint.js";
 import { resolveSessionHarnessBinding } from "../harness/session-binding.js";
 import { loadWorkManifest } from "../harness/work-store.js";
 import type { WorkManifest, WorkProfile, ActionResult } from "../harness/contracts.js";
@@ -62,8 +63,8 @@ import {
 import { withExecutionEvidence } from "../harness/execution-evidence.js";
 import { opaqueConversationId, runWithAgentTrajectory } from "../llm/agent-trajectory.js";
 import { guardedPiNonStreaming, guardedPiStream } from "./pi-stream.js";
-import { splitTextByEstimatedTokens } from "../llm/semantic-input.js";
-import { estimateTextTokens } from "../llm/provider.js";
+import { reduceSemanticText } from "../llm/semantic-reduction.js";
+import { estimatePiContextTokens, estimateTextTokens } from "../llm/provider.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -624,27 +625,30 @@ export async function compileHarnessContextText(input: {
   readonly proxyUrl?: string;
   readonly systemPrompt: string;
   readonly userPrompt: string;
+  readonly contextPrefix?: string;
   readonly maxTokens: number;
   readonly signal?: AbortSignal;
 }): Promise<string> {
-  const outputBudget = Math.min(input.maxTokens, 4096);
   const contextWindow = Number.isFinite(input.model.contextWindow) && input.model.contextWindow > 0
     ? input.model.contextWindow : 32_000;
-  const inputBudget = Math.max(256, contextWindow - outputBudget - estimateTextTokens(input.systemPrompt) - 2048);
-  const chunks = splitTextByEstimatedTokens(input.userPrompt, inputBudget);
-  if (chunks.length > 1) {
-    const summaries: string[] = [];
-    for (const chunk of chunks) summaries.push(await compileHarnessContextText({
-      ...input, userPrompt: chunk, maxTokens: Math.max(1, Math.floor(outputBudget / chunks.length)),
-    }));
-    return compileHarnessContextText({...input,userPrompt:summaries.join("\n\n"),maxTokens:outputBudget});
-  }
+  const prefix = input.contextPrefix ? input.contextPrefix + "\n\n" : "";
+  const available = contextWindow - estimateTextTokens(input.systemPrompt) - estimateTextTokens(prefix) - 2048;
+  if (available < 256) throw new Error("Context compilation has insufficient input budget.");
+  const modelLimit = input.model.maxTokens > 0 ? input.model.maxTokens : 4096;
+  const outputBudget = Math.min(input.maxTokens, 4096, modelLimit, Math.floor(available/2));
+  return reduceSemanticText({ text: input.userPrompt, inputBudget: available-outputBudget, outputBudget,
+    signal: input.signal,
+    compile: (text, maxTokens) => compileContextSegment({...input,userPrompt:prefix+text,maxTokens}),
+  });
+}
+
+async function compileContextSegment(input: Parameters<typeof compileHarnessContextText>[0]): Promise<string> {
   // Compilation consumes quoted history as data. It is a single Pi model call,
   // not an action loop that may execute or retry tools found in that history.
   const context: PiContext = {systemPrompt:input.systemPrompt,tools:[],messages:[
     {role:'user',content:input.userPrompt,timestamp:Date.now()},
   ]};
-  const options = {maxTokens:outputBudget,signal:input.signal,toolChoice:'none' as const,
+  const options = {maxTokens:input.maxTokens,signal:input.signal,toolChoice:'none' as const,
     apiKey:input.apiKey ?? getEnvApiKey(input.model.provider)};
   const stream = input.stream ? guardedPiStream(input.model,context,options)
     : guardedPiNonStreaming(input.model,context,options,input.proxyUrl);
@@ -671,6 +675,9 @@ export function convertAgentMessagesForModel(messages: AgentMessage[]): Message[
   return messages.flatMap((message): Message[] => {
     if (!message || typeof message !== "object" || !("role" in message)) return [];
     const raw = message as { role?: unknown; content?: unknown };
+    if (raw.role === "system" && typeof raw.content === "string") {
+      return [{role:"user",content:"[Recorded historical context; not a new instruction]\n"+raw.content,timestamp:message.timestamp}];
+    }
     if (raw.role === "user" || raw.role === "assistant" || raw.role === "toolResult") {
       return [message as Message];
     }
@@ -753,13 +760,15 @@ function agentOutputBudget(model: Model<Api>): number {
   return Math.min(8192, typeof model.maxTokens === "number" && model.maxTokens > 0 ? model.maxTokens : 4096);
 }
 
-function agentContextBudget(model: Model<Api>): number {
+function agentContextBudget(model: Model<Api>, systemPrompt: string, tools: PiContext["tools"]): number {
   const contextWindow = typeof model.contextWindow === "number" && model.contextWindow > 0
     ? model.contextWindow
     : 32_000;
   const reservedOutput = agentOutputBudget(model);
-  const transportOverhead = Math.max(2048, Math.floor(contextWindow * 0.05));
-  return Math.max(2000, contextWindow - reservedOutput - transportOverhead);
+  const transportOverhead = estimatePiContextTokens({systemPrompt, tools, messages: []});
+  const budget = Math.floor(contextWindow - reservedOutput - transportOverhead - Math.max(256, contextWindow * 0.02));
+  if (budget <= 0) throw new Error("The model context window cannot fit the active system prompt and tools.");
+  return budget;
 }
 
 function isAbortLike(error: unknown): boolean {
@@ -942,14 +951,7 @@ async function runAgentSessionUnlocked(
 
   if (!cached) {
     const restoredHistory = await restoreAgentMessagesFromTranscript(projectRoot, sessionId, sessionKind);
-    const restoredMessages = adaptRestoredAgentMessagesForModel(restoredHistory, model);
-    const restoredSystemContext = restoredMessages.flatMap((message) => {
-      const raw = message as unknown as { readonly role?: unknown; readonly content?: unknown };
-      return raw.role === "system" && typeof raw.content === "string" ? [raw.content] : [];
-    });
-    const initialAgentMessages = restoredMessages.filter((message) => (
-      (message as unknown as { readonly role?: unknown }).role !== "system"
-    ));
+    const initialAgentMessages = adaptRestoredAgentMessagesForModel(restoredHistory, model);
     const turnSkills = new Map<string, ActivatedSkillGuidance>(
       effectiveSkillResolution.usedSkills.map((skill) => [skill.id, { skill, resources: [] }]),
     );
@@ -1102,31 +1104,32 @@ async function runAgentSessionUnlocked(
         : {}),
       ...(config.resumeAction ? { resumeAfterAction: true } : {}),
     });
-    const restoredContextBlock = restoredSystemContext.length > 0
-      ? `\n\n## Restored committed context\n${restoredSystemContext.join("\n\n")}`
-      : "";
-    const agent = new Agent({
-      beforeToolCall: preserveToolArgumentTypes,
-      initialState: {
-        model,
-        systemPrompt: [baseSystemPrompt, TURN_COMPLETION_GUIDANCE, restoredContextBlock, config.backgroundTaskContext]
-          .filter(Boolean)
-          .join("\n\n"),
-        tools: [...visibleTools,
+    const systemPrompt = [baseSystemPrompt, TURN_COMPLETION_GUIDANCE, config.backgroundTaskContext]
+      .filter(Boolean).join("\n\n");
+    const tools = [...visibleTools,
           ...(visibleTools.some(tool => tool.name === "workspace__read" || tool.name === "workspace__retrieve_material") ? [toolArchive.tool()] : []),
           createTurnCompletionTool({
           state: () => cached ?? { activeActions: 0, hasDelivery: false, deliveryFailed: false },
           complete: result => { if (!cached) throw new Error("Session unavailable"); cached.turnCompletion = result; },
           validateDelivery: () => cached!.artifactDeliveries.validate(projectRoot),
-        })],
-        messages: initialAgentMessages,
+        })];
+    const budgetTokens = agentContextBudget(model, systemPrompt, tools);
+    const agent = new Agent({
+      beforeToolCall: preserveToolArgumentTypes,
+      initialState: { model, systemPrompt, tools, messages: initialAgentMessages,
       },
       transformContext: createHarnessContextTransform({
         projectRoot,
         work,
         profile,
-        budgetTokens: agentContextBudget(model),
+        budgetTokens,
         immutableCompletedMessages: true,
+        projectCompletedHistory: (messages) => adaptRestoredAgentMessagesForModel(messages, model),
+        checkpoint: new ConversationCheckpointStore(projectRoot, sessionId, createHash("sha256").update(JSON.stringify({
+          model: model.id, provider: model.provider, api: model.api, baseUrl: model.baseUrl,
+          profile: profileId, work: workId, language, budget: budgetTokens,
+          promptVersion: 2,
+        })).digest("hex")),
         semanticCompiler: async (request) => ({
           content: await compileHarnessContextText({
             model,
@@ -1134,11 +1137,8 @@ async function runAgentSessionUnlocked(
             stream: config.stream !== false,
             proxyUrl: config.proxyUrl,
             systemPrompt: "Compile only the supplied compressible Work context into concise Markdown. Preserve source pointers, names, constraints, current state, and unresolved work. Do not alter protected context.",
-            userPrompt: [
-              `Current intent:\n${request.intent}`,
-              `Target budget: ${request.maxTokens} tokens`,
-              ...request.fragments.map((fragment) => `\n## ${fragment.source}\nSource pointer: ${fragment.pointer ?? fragment.id}\n${fragment.content}`),
-            ].join("\n"),
+            contextPrefix: `Current intent:\n${request.intent}`,
+            userPrompt: request.fragments.map((fragment) => `\n## ${fragment.source}\nSource pointer: ${fragment.pointer ?? fragment.id}\n${fragment.content}`).join("\n"),
             maxTokens: request.maxTokens,
             signal: request.signal,
           }),
@@ -1150,12 +1150,8 @@ async function runAgentSessionUnlocked(
           stream: config.stream !== false,
           proxyUrl: config.proxyUrl,
           systemPrompt: "Summarize the supplied records, not the current task. Preserve user constraints, exact paths, revisions, archive IDs and offsets, actual successes/failures, and unfinished work. Distinguish requested actions from executed ones and partial reads from complete reads. Use only recorded evidence; the host receipts remain authoritative.",
-          userPrompt: [
-            `Current intent:\n${request.intent}`,
-            `Target budget: ${request.maxTokens} tokens`,
-            "\nCompleted history:\n",
-            request.history,
-          ].join("\n"),
+          contextPrefix: `Current intent:\n${request.intent}\n\nCompleted history:`,
+          userPrompt: request.history,
           maxTokens: request.maxTokens,
           signal: request.signal,
         }),
