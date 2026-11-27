@@ -1,7 +1,8 @@
 import { Command } from "commander";
-import { StateManager, writeExportArtifact, ChapterExportSourceError } from "@actalk/inkos-core";
+import { StateManager } from "@actalk/inkos-core/state/manager";
+import { writeExportArtifact, ChapterExportSourceError } from "@actalk/inkos-core/interaction/export-artifact";
 import { join } from "node:path";
-import { findProjectRoot, resolveBookId, log, logError } from "../utils.js";
+import { findProjectRoot, resolveBookId, log, logError } from "../project-io.js";
 
 export const exportCommand = new Command("export")
   .description("Export book chapters to a single file")

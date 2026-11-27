@@ -1,14 +1,10 @@
 import { Command } from "commander";
-import {
-  createTranslationCreateTool,
-  createTranslationRunTool,
-  createTranslationExportTool,
-  createBuiltInWorkProfileRegistry,
-  executeExplicitCapabilityTool,
-  loadAvailableAgentSkills,
-  PipelineRunner,
-  resolveProfileSkillActivations,
-} from "@actalk/inkos-core";
+import { createTranslationCreateTool, createTranslationRunTool, createTranslationExportTool } from "@actalk/inkos-core/harness/tools/translation";
+import { createBuiltInWorkProfileRegistry } from "@actalk/inkos-core/harness/builtin-profiles";
+import { executeExplicitCapabilityTool } from "@actalk/inkos-core/harness/explicit-action";
+import { loadAvailableAgentSkills } from "@actalk/inkos-core/skills/builtin-loader";
+import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
+import { resolveProfileSkillActivations } from "@actalk/inkos-core/skills/activations";
 import { buildPipelineConfig, findProjectRoot, loadConfig, log, logError } from "../utils.js";
 
 export const translateCommand = new Command("translate")

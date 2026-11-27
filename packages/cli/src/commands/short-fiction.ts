@@ -1,21 +1,14 @@
 import { Command } from "commander";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import {
-  SHORT_FICTION_DEFAULT_CHAPTERS,
-  SHORT_FICTION_DEFAULT_CHARS_PER_CHAPTER,
-  SHORT_FICTION_EN_DEFAULT_WORDS_PER_CHAPTER,
-  activatedSkillIds,
-  createBuiltInWorkProfileRegistry,
-  createShortFictionRunTool,
-  createShortFictionReviseTool,
-  executeExplicitCapabilityTool,
-  loadAvailableAgentSkills,
-  PipelineRunner,
-  resolveProfileSkillActivations,
-  type ShortFictionReference,
-  type ShortFictionLanguage,
-} from "@actalk/inkos-core";
+import { SHORT_FICTION_DEFAULT_CHAPTERS, SHORT_FICTION_DEFAULT_CHARS_PER_CHAPTER, SHORT_FICTION_EN_DEFAULT_WORDS_PER_CHAPTER } from "@actalk/inkos-core/agents/short-fiction";
+import { activatedSkillIds, resolveProfileSkillActivations } from "@actalk/inkos-core/skills/activations";
+import { createBuiltInWorkProfileRegistry } from "@actalk/inkos-core/harness/builtin-profiles";
+import { createShortFictionRunTool, createShortFictionReviseTool } from "@actalk/inkos-core/agent/agent-tools";
+import { executeExplicitCapabilityTool } from "@actalk/inkos-core/harness/explicit-action";
+import { loadAvailableAgentSkills } from "@actalk/inkos-core/skills/builtin-loader";
+import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
+import type { ShortFictionReference, ShortFictionLanguage } from "@actalk/inkos-core";
 import { buildPipelineConfig, findProjectRoot, loadConfig, log, logError, resolveCliProfileSkills } from "../utils.js";
 
 export { extractResponsesImageBase64, resolveCoverApiKey } from "@actalk/inkos-core";

@@ -1,12 +1,9 @@
 import { Command } from "commander";
-import {
-  CreativeEpisodeStore,
-  listWorkManifests,
-  loadWorkManifest,
-  migrateLegacyWorks,
-} from "@actalk/inkos-core";
+import { CreativeEpisodeStore } from "@actalk/inkos-core/harness/episode-store";
+import { listWorkManifests, loadWorkManifest } from "@actalk/inkos-core/harness/work-store";
+import { migrateLegacyWorks } from "@actalk/inkos-core/harness/legacy-migration";
 import { join } from "node:path";
-import { findProjectRoot, log, logError } from "../utils.js";
+import { findProjectRoot, log, logError } from "../project-io.js";
 
 export const workCommand = new Command("work")
   .description("Inspect creative Works, artifacts, revisions, and Episodes");

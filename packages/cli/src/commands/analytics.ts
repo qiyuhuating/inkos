@@ -1,5 +1,6 @@
 import { Command } from "commander";
-import { StateManager, computeAnalytics } from "@actalk/inkos-core";
+import { StateManager } from "@actalk/inkos-core/state/manager";
+import { computeAnalytics } from "@actalk/inkos-core/utils/analytics";
 import { loadConfig, findProjectRoot, resolveBookId, log, logError } from "../utils.js";
 
 export const analyticsCommand = new Command("analytics")

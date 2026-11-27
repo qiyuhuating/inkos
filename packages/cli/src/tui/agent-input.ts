@@ -1,22 +1,11 @@
-import {
-  ActionPayloadSchema,
-  CreativeEpisodeStore,
-  appendInteractionMessage,
-  createLLMClient,
-  RequestedIntentSchema,
-  runAgentSession,
-  listWorkManifests,
-  loadWorkManifest,
-  resolveSessionHarnessBinding,
-  SessionKindSchema,
-  type ActionPayload,
-  type ActionSource,
-  type InteractionSession,
-  type PendingProposedAction,
-  type PlayMode,
-  type RequestedIntent,
-  type SessionKind,
-} from "@actalk/inkos-core";
+import { ActionPayloadSchema, RequestedIntentSchema } from "@actalk/inkos-core/interaction/action-envelope";
+import { CreativeEpisodeStore } from "@actalk/inkos-core/harness/episode-store";
+import { appendInteractionMessage, SessionKindSchema } from "@actalk/inkos-core/interaction/session";
+import { createLLMClient } from "@actalk/inkos-core/llm/provider";
+import { runAgentSession } from "@actalk/inkos-core/agent/agent-session";
+import { listWorkManifests, loadWorkManifest } from "@actalk/inkos-core/harness/work-store";
+import { resolveSessionHarnessBinding } from "@actalk/inkos-core/harness/session-binding";
+import type { ActionPayload, ActionSource, InteractionSession, PendingProposedAction, PlayMode, RequestedIntent, SessionKind } from "@actalk/inkos-core";
 import { join } from "node:path";
 import { persistProjectSession } from "./session-store.js";
 import { buildPipelineConfig, loadConfig } from "../utils.js";

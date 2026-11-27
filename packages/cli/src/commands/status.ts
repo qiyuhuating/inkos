@@ -1,6 +1,7 @@
 import { Command } from "commander";
-import { StateManager, formatLengthCount, resolveLengthCountingMode } from "@actalk/inkos-core";
-import { findProjectRoot, log, logError } from "../utils.js";
+import { StateManager } from "@actalk/inkos-core/state/manager";
+import { formatLengthCount, resolveLengthCountingMode } from "@actalk/inkos-core/utils/length-metrics";
+import { findProjectRoot, log, logError } from "../project-io.js";
 
 export const statusCommand = new Command("status")
   .description("Show project status")

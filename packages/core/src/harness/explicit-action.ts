@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { ActionResult } from "./contracts.js";
 import { CreativeEpisodeStore } from "./episode-store.js";
 import { createBuiltInWorkProfileRegistry } from "./builtin-profiles.js";
-import { createSingleToolCapabilityRegistry, type ConfirmedCapabilityBinding } from "./production-capabilities.js";
+import { createSingleToolCapabilityRegistry, type ConfirmedCapabilityBinding } from "./tool-capability.js";
 import { CreativeHarnessRuntime } from "./runtime.js";
 import { loadWorkManifest } from "./work-store.js";
 import { opaqueConversationId, runWithAgentTrajectory } from "../llm/agent-trajectory.js";

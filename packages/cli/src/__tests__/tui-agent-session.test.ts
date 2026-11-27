@@ -15,22 +15,8 @@ const {
   buildPipelineConfigMock: vi.fn(),
 }));
 
-vi.mock("@actalk/inkos-core", async () => {
-  const actual = await vi.importActual<typeof import("@actalk/inkos-core")>("@actalk/inkos-core");
-  class PipelineRunnerMock {
-    constructor(_config: unknown) {}
-    async initBook(_book: unknown, _options?: unknown) {}
-    async writeNextChapter(_bookId: string) {
-      return {
-        chapterNumber: 1,
-        title: "雨夜",
-        wordCount: 1200,
-        observations: [],
-      };
-    }
-  }
-  return {
-    ...actual,
+vi.mock("@actalk/inkos-core/llm/provider", async () => ({
+  ...await vi.importActual<typeof import("@actalk/inkos-core/llm/provider")>("@actalk/inkos-core/llm/provider"),
     createLLMClient: vi.fn(() => ({
       _piModel: {
         id: "gpt-5.4",
@@ -46,10 +32,11 @@ vi.mock("@actalk/inkos-core", async () => {
       },
       _apiKey: "secret",
     })),
-    PipelineRunner: PipelineRunnerMock as any,
-    runAgentSession: runAgentSessionMock,
-  };
-});
+}));
+
+vi.mock("@actalk/inkos-core/agent/agent-session", () => ({
+  runAgentSession: runAgentSessionMock,
+}));
 
 vi.mock("../utils.js", () => ({
   loadConfig: loadConfigMock,

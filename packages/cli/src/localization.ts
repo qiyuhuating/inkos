@@ -1,4 +1,5 @@
-import { formatLengthCount, resolveLengthCountingMode, type Observation } from "@actalk/inkos-core";
+import { formatLengthCount, resolveLengthCountingMode } from "@actalk/inkos-core/utils/length-metrics";
+import type { Observation } from "@actalk/inkos-core";
 
 export type CliLanguage = "zh" | "en";
 

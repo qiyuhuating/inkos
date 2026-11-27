@@ -1,5 +1,7 @@
 import { Command } from "commander";
-import { loadWorkManifest, PipelineRunner, runAgentSession } from "@actalk/inkos-core";
+import { loadWorkManifest } from "@actalk/inkos-core/harness/work-store";
+import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
+import { runAgentSession } from "@actalk/inkos-core/agent/agent-session";
 import { buildPipelineConfig, loadConfig, createClient, findProjectRoot, resolveBookId, resolveContext, log, logError } from "../utils.js";
 
 export const agentCommand = new Command("agent")

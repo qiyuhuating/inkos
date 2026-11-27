@@ -1,6 +1,15 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { createLLMClient, StateManager, createLogger, createStderrSink, createJsonLineSink, resolveEffectiveLLMConfig, loadLLMEnvLayers, GLOBAL_CONFIG_DIR, GLOBAL_ENV_PATH, createBuiltInWorkProfileRegistry, loadAvailableAgentSkills, mergeActivatedSkillGuidance, resolveProfileSkillActivations, type ActivatedSkillGuidance, type EffectiveLLMConfigResult, type LLMApiFormat, type LLMConfigCliOverrides, type ProjectConfig, type PipelineConfig, type LogSink } from "@actalk/inkos-core";
+import { createLLMClient } from "@actalk/inkos-core/llm/provider";
+import { findProjectRoot } from "./project-io.js";
+export { findProjectRoot, log, logError, resolveBookId } from "./project-io.js";
+import { createLogger, createStderrSink, createJsonLineSink } from "@actalk/inkos-core/utils/logger";
+import { resolveEffectiveLLMConfig } from "@actalk/inkos-core/utils/effective-llm-config";
+import { loadLLMEnvLayers, GLOBAL_CONFIG_DIR, GLOBAL_ENV_PATH } from "@actalk/inkos-core/utils/llm-env";
+import { createBuiltInWorkProfileRegistry } from "@actalk/inkos-core/harness/builtin-profiles";
+import { loadAvailableAgentSkills } from "@actalk/inkos-core/skills/builtin-loader";
+import { mergeActivatedSkillGuidance, resolveProfileSkillActivations } from "@actalk/inkos-core/skills/activations";
+import type { ActivatedSkillGuidance, EffectiveLLMConfigResult, LLMApiFormat, LLMConfigCliOverrides, ProjectConfig, PipelineConfig, LogSink } from "@actalk/inkos-core";
 
 export { GLOBAL_CONFIG_DIR, GLOBAL_ENV_PATH };
 
@@ -23,10 +32,6 @@ export async function resolveContext(opts: {
     if (text.length > 0) return text;
   }
   return undefined;
-}
-
-export function findProjectRoot(): string {
-  return process.cwd();
 }
 
 export async function resolveCliProfileSkills(
@@ -164,46 +169,4 @@ export function buildPipelineConfig(
     logger,
     onStreamProgress,
   };
-}
-
-export function log(message: string): void {
-  process.stdout.write(`${message}\n`);
-}
-
-export function logError(message: string): void {
-  process.stderr.write(`[ERROR] ${message}\n`);
-}
-
-/**
- * Resolve book-id: if provided use it, otherwise auto-detect when exactly one book exists.
- * Validates that the book actually exists.
- */
-export async function resolveBookId(
-  bookIdArg: string | undefined,
-  root: string,
-): Promise<string> {
-  const state = new StateManager(root);
-  const books = await state.listBooks();
-
-  if (bookIdArg) {
-    if (!books.includes(bookIdArg)) {
-      const available = books.length > 0 ? books.join(", ") : "(none)";
-      throw new Error(
-        `Book "${bookIdArg}" not found. Available books: ${available}`,
-      );
-    }
-    return bookIdArg;
-  }
-
-  if (books.length === 0) {
-    throw new Error(
-      "No books found. Create one first:\n  inkos book create --title '...' --genre xuanhuan",
-    );
-  }
-  if (books.length === 1) {
-    return books[0]!;
-  }
-  throw new Error(
-    `Multiple books found: ${books.join(", ")}\nPlease specify a book-id.`,
-  );
 }

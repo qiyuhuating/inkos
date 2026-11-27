@@ -1,6 +1,6 @@
 import { access, cp, mkdir, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { workDirectory } from "@actalk/inkos-core";
+import { workDirectory } from "@actalk/inkos-core/harness/work-store";
 
 export interface BookBackupInfo {
   readonly id: string;

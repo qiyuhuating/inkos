@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { findProjectRoot, log, logError, GLOBAL_ENV_PATH } from "../utils.js";
-import { fetchWithProxy } from "@actalk/inkos-core";
+import { fetchWithProxy } from "@actalk/inkos-core/utils/proxy-fetch";
 import {
   ensureNodeRuntimePinFiles,
   evaluateNodeRuntimeSupport,

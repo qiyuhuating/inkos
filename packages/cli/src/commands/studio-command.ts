@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { resolve } from "node:path";
-import { findProjectRoot } from "../utils.js";
+import { findProjectRoot } from "../project-io.js";
 import type { StudioCommandHooks } from "./studio.js";
 
 export function createStudioCommand(hooks: StudioCommandHooks = {}): Command {

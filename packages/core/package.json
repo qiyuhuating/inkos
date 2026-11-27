@@ -40,6 +40,154 @@
     "./forecast/schema": {
       "types": "./dist/forecast/schema.d.ts",
       "import": "./dist/forecast/schema.js"
+    },
+    "./agent/agent-session": {
+      "types": "./dist/agent/agent-session.d.ts",
+      "import": "./dist/agent/agent-session.js"
+    },
+    "./agent/agent-tools": {
+      "types": "./dist/agent/agent-tools.d.ts",
+      "import": "./dist/agent/agent-tools.js"
+    },
+    "./agents/detection-insights": {
+      "types": "./dist/agents/detection-insights.d.ts",
+      "import": "./dist/agents/detection-insights.js"
+    },
+    "./agents/reviser": {
+      "types": "./dist/agents/reviser.d.ts",
+      "import": "./dist/agents/reviser.js"
+    },
+    "./agents/short-fiction": {
+      "types": "./dist/agents/short-fiction.d.ts",
+      "import": "./dist/agents/short-fiction.js"
+    },
+    "./forecast/runner": {
+      "types": "./dist/forecast/runner.d.ts",
+      "import": "./dist/forecast/runner.js"
+    },
+    "./harness/builtin-profiles": {
+      "types": "./dist/harness/builtin-profiles.d.ts",
+      "import": "./dist/harness/builtin-profiles.js"
+    },
+    "./harness/episode-store": {
+      "types": "./dist/harness/episode-store.d.ts",
+      "import": "./dist/harness/episode-store.js"
+    },
+    "./harness/explicit-action": {
+      "types": "./dist/harness/explicit-action.d.ts",
+      "import": "./dist/harness/explicit-action.js"
+    },
+    "./harness/legacy-migration": {
+      "types": "./dist/harness/legacy-migration.d.ts",
+      "import": "./dist/harness/legacy-migration.js"
+    },
+    "./harness/session-binding": {
+      "types": "./dist/harness/session-binding.d.ts",
+      "import": "./dist/harness/session-binding.js"
+    },
+    "./harness/tools/longform-production": {
+      "types": "./dist/harness/tools/longform-production.d.ts",
+      "import": "./dist/harness/tools/longform-production.js"
+    },
+    "./harness/tools/translation": {
+      "types": "./dist/harness/tools/translation.d.ts",
+      "import": "./dist/harness/tools/translation.js"
+    },
+    "./harness/work-store": {
+      "types": "./dist/harness/work-store.d.ts",
+      "import": "./dist/harness/work-store.js"
+    },
+    "./interaction/action-envelope": {
+      "types": "./dist/interaction/action-envelope.d.ts",
+      "import": "./dist/interaction/action-envelope.js"
+    },
+    "./interaction/export-artifact": {
+      "types": "./dist/interaction/export-artifact.d.ts",
+      "import": "./dist/interaction/export-artifact.js"
+    },
+    "./interaction/session": {
+      "types": "./dist/interaction/session.d.ts",
+      "import": "./dist/interaction/session.js"
+    },
+    "./llm/provider": {
+      "types": "./dist/llm/provider.d.ts",
+      "import": "./dist/llm/provider.js"
+    },
+    "./llm/service-presets": {
+      "types": "./dist/llm/service-presets.d.ts",
+      "import": "./dist/llm/service-presets.js"
+    },
+    "./models/book": {
+      "types": "./dist/models/book.d.ts",
+      "import": "./dist/models/book.js"
+    },
+    "./notify/dispatcher": {
+      "types": "./dist/notify/dispatcher.d.ts",
+      "import": "./dist/notify/dispatcher.js"
+    },
+    "./pipeline/detection-runner": {
+      "types": "./dist/pipeline/detection-runner.d.ts",
+      "import": "./dist/pipeline/detection-runner.js"
+    },
+    "./pipeline/runner": {
+      "types": "./dist/pipeline/runner.d.ts",
+      "import": "./dist/pipeline/runner.js"
+    },
+    "./pipeline/scheduler": {
+      "types": "./dist/pipeline/scheduler.d.ts",
+      "import": "./dist/pipeline/scheduler.js"
+    },
+    "./skills/activations": {
+      "types": "./dist/skills/activations.d.ts",
+      "import": "./dist/skills/activations.js"
+    },
+    "./skills/builtin-loader": {
+      "types": "./dist/skills/builtin-loader.d.ts",
+      "import": "./dist/skills/builtin-loader.js"
+    },
+    "./state/chapter-delete": {
+      "types": "./dist/state/chapter-delete.d.ts",
+      "import": "./dist/state/chapter-delete.js"
+    },
+    "./state/chapter-word-sync": {
+      "types": "./dist/state/chapter-word-sync.d.ts",
+      "import": "./dist/state/chapter-word-sync.js"
+    },
+    "./state/manager": {
+      "types": "./dist/state/manager.d.ts",
+      "import": "./dist/state/manager.js"
+    },
+    "./utils/analytics": {
+      "types": "./dist/utils/analytics.d.ts",
+      "import": "./dist/utils/analytics.js"
+    },
+    "./utils/atomic-file-set": {
+      "types": "./dist/utils/atomic-file-set.d.ts",
+      "import": "./dist/utils/atomic-file-set.js"
+    },
+    "./utils/book-id": {
+      "types": "./dist/utils/book-id.d.ts",
+      "import": "./dist/utils/book-id.js"
+    },
+    "./utils/effective-llm-config": {
+      "types": "./dist/utils/effective-llm-config.d.ts",
+      "import": "./dist/utils/effective-llm-config.js"
+    },
+    "./utils/length-metrics": {
+      "types": "./dist/utils/length-metrics.d.ts",
+      "import": "./dist/utils/length-metrics.js"
+    },
+    "./utils/llm-env": {
+      "types": "./dist/utils/llm-env.d.ts",
+      "import": "./dist/utils/llm-env.js"
+    },
+    "./utils/logger": {
+      "types": "./dist/utils/logger.d.ts",
+      "import": "./dist/utils/logger.js"
+    },
+    "./utils/proxy-fetch": {
+      "types": "./dist/utils/proxy-fetch.d.ts",
+      "import": "./dist/utils/proxy-fetch.js"
     }
   },
   "files": [

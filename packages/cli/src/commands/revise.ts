@@ -1,12 +1,10 @@
 import { Command } from "commander";
-import {
-  DEFAULT_REVISE_MODE,
-  PipelineRunner,
-  StateManager,
-  createReviseChapterTool,
-  executeExplicitCapabilityTool,
-  type ReviseMode,
-} from "@actalk/inkos-core";
+import { DEFAULT_REVISE_MODE } from "@actalk/inkos-core/agents/reviser";
+import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
+import { StateManager } from "@actalk/inkos-core/state/manager";
+import { createReviseChapterTool } from "@actalk/inkos-core/harness/tools/longform-production";
+import { executeExplicitCapabilityTool } from "@actalk/inkos-core/harness/explicit-action";
+import type { ReviseMode } from "@actalk/inkos-core";
 import { loadConfig, buildPipelineConfig, findProjectRoot, resolveBookId, log, logError, resolveCliProfileSkills } from "../utils.js";
 import {
   formatNotifyCommandTitle,

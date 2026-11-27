@@ -1,9 +1,7 @@
 import { Command } from "commander";
-import {
-  PipelineRunner,
-  createGenerateStyleGuideTool,
-  executeExplicitCapabilityTool,
-} from "@actalk/inkos-core";
+import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
+import { createGenerateStyleGuideTool } from "@actalk/inkos-core/harness/tools/longform-production";
+import { executeExplicitCapabilityTool } from "@actalk/inkos-core/harness/explicit-action";
 import { loadConfig, buildPipelineConfig, findProjectRoot, resolveBookId, log, logError, resolveCliProfileSkills } from "../utils.js";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";

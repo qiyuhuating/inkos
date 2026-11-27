@@ -1,9 +1,7 @@
 import { Command } from "commander";
-import {
-  PipelineRunner,
-  loadWorkManifest,
-  runAgentSession,
-} from "@actalk/inkos-core";
+import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
+import { loadWorkManifest } from "@actalk/inkos-core/harness/work-store";
+import { runAgentSession } from "@actalk/inkos-core/agent/agent-session";
 import { buildPipelineConfig, createClient, findProjectRoot, loadConfig } from "../utils.js";
 
 export interface InteractCommandHooks {

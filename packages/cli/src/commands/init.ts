@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { log, logError } from "../utils.js";
+import { log, logError } from "../project-io.js";
 import { initializeProjectDirectory } from "../project-bootstrap.js";
 
 export const initCommand = new Command("init")

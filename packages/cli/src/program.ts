@@ -1,7 +1,7 @@
-import { createRequire } from "node:module";
-import { recoverAtomicFileSets } from "@actalk/inkos-core";
-import { findProjectRoot } from "./utils.js";
-import { Command } from "commander";
+import type { Command } from "commander";
+import { createRootProgram, type ProgramHooks } from "./root-program.js";
+export type { ProgramHooks } from "./root-program.js";
+export { runProgram } from "./startup.js";
 import { initCommand } from "./commands/init.js";
 import { configCommand } from "./commands/config.js";
 import { bookCommand } from "./commands/book.js";
@@ -26,43 +26,13 @@ import { shortCommand } from "./commands/short-fiction.js";
 import { forecastCommand } from "./commands/forecast.js";
 import { translateCommand } from "./commands/translate.js";
 import { createStudioCommand } from "./commands/studio-command.js";
-import { createInteractCommand, type InteractCommandHooks } from "./commands/interact.js";
+import { createInteractCommand } from "./commands/interact.js";
 import { createTuiCommand } from "./commands/tui.js";
 import { workCommand } from "./commands/work.js";
 
-const require = createRequire(import.meta.url);
-const { version } = require("../package.json") as { version: string };
-
-export interface ProgramHooks {
-  readonly launchTui?: (projectRoot: string) => Promise<void> | void;
-  readonly launchStudio?: (projectRoot: string, port: string) => Promise<void> | void;
-  readonly studioRecentProjectPath?: string;
-  readonly readInteractionInput?: InteractCommandHooks["readInput"];
-}
-
+/** Eager program factory retained for programmatic consumers. */
 export function createProgram(hooks: ProgramHooks = {}): Command {
-  const program = new Command();
-
-  program
-    .name("inkos")
-    .description("InkOS — Multi-agent novel production system")
-    .version(version)
-    .enablePositionalOptions()
-    .option("--service <service>", "Override LLM service for this CLI run")
-    .option("--model <model>", "Override LLM model for this CLI run")
-    .option("--api-key-env <envVar>", "Read LLM API key from this environment variable for this CLI run")
-    .option("--base-url <url>", "Override LLM base URL for this CLI run")
-    .option("--api-format <chat|responses|anthropic>", "Override LLM API format for this CLI run")
-    .option("--stream", "Force streaming LLM responses for this CLI run")
-    .option("--no-stream", "Force non-streaming LLM responses for this CLI run")
-    .action(async () => {
-      const { launchStudioEntry } = await import("./commands/studio.js");
-      await launchStudioEntry(process.cwd(), "4567", {
-        launchStudio: hooks.launchStudio,
-        recentProjectPath: hooks.studioRecentProjectPath,
-      });
-    });
-
+  const program = createRootProgram(hooks);
   program.addCommand(initCommand);
   program.addCommand(configCommand);
   program.addCommand(bookCommand);
@@ -98,18 +68,4 @@ export function createProgram(hooks: ProgramHooks = {}): Command {
   program.addCommand(createTuiCommand({ launchTui: hooks.launchTui }));
 
   return program;
-}
-
-export async function runProgram(
-  argv: string[] = process.argv,
-  hooks: ProgramHooks = {},
-): Promise<void> {
-  const program = createProgram(hooks);
-  program.hook("preAction", async () => {
-    let root: string;
-    try { root = findProjectRoot(); }
-    catch { return; } // init and help may run outside a project.
-    await recoverAtomicFileSets(root, true);
-  });
-  await program.parseAsync(argv);
 }

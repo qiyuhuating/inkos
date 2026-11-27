@@ -1,7 +1,5 @@
-import {
-  appendInteractionMessage,
-  type InteractionSession,
-} from "@actalk/inkos-core";
+import { appendInteractionMessage } from "@actalk/inkos-core/interaction/session";
+import type { InteractionSession } from "@actalk/inkos-core";
 
 export function createOptimisticUserMessageSession(
   session: InteractionSession,

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
 
-import { runProgram } from "./program.js";
+import { runProgram } from "./startup.js";
 
 await runProgram();

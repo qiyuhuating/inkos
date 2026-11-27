@@ -1,11 +1,8 @@
 import { Command } from "commander";
-import {
-  StateManager,
-  detectChapter,
-  loadDetectionHistory,
-  analyzeDetectionInsights,
-  type DetectionConfig,
-} from "@actalk/inkos-core";
+import { StateManager } from "@actalk/inkos-core/state/manager";
+import { detectChapter, loadDetectionHistory } from "@actalk/inkos-core/pipeline/detection-runner";
+import { analyzeDetectionInsights } from "@actalk/inkos-core/agents/detection-insights";
+import type { DetectionConfig } from "@actalk/inkos-core";
 import { loadConfig, findProjectRoot, resolveBookId, log, logError } from "../utils.js";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";

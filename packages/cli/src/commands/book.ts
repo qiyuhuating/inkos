@@ -2,16 +2,14 @@ import { Command } from "commander";
 import { access, readFile, rm } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { join, resolve } from "node:path";
-import {
-  createBookFoundationTool,
-  deriveBookIdFromTitle,
-  executeExplicitCapabilityTool,
-  PlatformSchema,
-  PipelineRunner,
-  StateManager,
-  workDirectory,
-  type BookConfig,
-} from "@actalk/inkos-core";
+import { createBookFoundationTool } from "@actalk/inkos-core/harness/tools/longform-production";
+import { deriveBookIdFromTitle } from "@actalk/inkos-core/utils/book-id";
+import { executeExplicitCapabilityTool } from "@actalk/inkos-core/harness/explicit-action";
+import { PlatformSchema } from "@actalk/inkos-core/models/book";
+import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
+import { StateManager } from "@actalk/inkos-core/state/manager";
+import { workDirectory } from "@actalk/inkos-core/harness/work-store";
+import type { BookConfig } from "@actalk/inkos-core";
 import {
   formatBookBackupCreated,
   formatBookBackupListEmpty,

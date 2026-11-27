@@ -1,11 +1,9 @@
 import { Command } from "commander";
-import {
-  PipelineRunner,
-  StateManager,
-  createWriteChaptersTool,
-  executeExplicitCapabilityTool,
-  type Observation,
-} from "@actalk/inkos-core";
+import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
+import { StateManager } from "@actalk/inkos-core/state/manager";
+import { createWriteChaptersTool } from "@actalk/inkos-core/harness/tools/longform-production";
+import { executeExplicitCapabilityTool } from "@actalk/inkos-core/harness/explicit-action";
+import type { Observation } from "@actalk/inkos-core";
 import { loadConfig, buildPipelineConfig, findProjectRoot, resolveBookId, log, logError, resolveCliProfileSkills } from "../utils.js";
 import {
   formatAutoWriteAlreadyComplete,

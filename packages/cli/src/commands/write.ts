@@ -1,12 +1,9 @@
 import { Command } from "commander";
-import {
-  PipelineRunner,
-  StateManager,
-  createResyncChapterStateTool,
-  createWriteChaptersTool,
-  executeExplicitCapabilityTool,
-  type Observation,
-} from "@actalk/inkos-core";
+import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
+import { StateManager } from "@actalk/inkos-core/state/manager";
+import { createWriteChaptersTool } from "@actalk/inkos-core/harness/tools/longform-production";
+import { executeExplicitCapabilityTool } from "@actalk/inkos-core/harness/explicit-action";
+import type { Observation } from "@actalk/inkos-core";
 import { readdir, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -314,6 +311,7 @@ writeCommand
       const pipeline = new PipelineRunner(buildPipelineConfig(config, root, {
         externalContext: opts.brief,
       }));
+      const { createResyncChapterStateTool } = await import("@actalk/inkos-core/agent/agent-tools");
       const activatedSkills = await resolveCliProfileSkills(root, "longform-novel", { includeRecommended: true });
       const action = await executeExplicitCapabilityTool({
         projectRoot: root,

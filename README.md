@@ -699,6 +699,24 @@ node --expose-gc benchmarks/longform-memory-replay.mjs ../inkos benchmarks/chapt
 node --expose-gc benchmarks/longform-memory-replay.mjs ../inkos-v2 benchmarks/chapter-001.md
 ```
 
+### CLI 与 Core 依赖隔离
+
+CLI 使用精确 Core 子路径，不再通过根 barrel 导入运行时实现；根导出仍兼容原有使用者。CLI 入口按 Commander 实际解析的顶层命令动态加载原命令模块，保留完整选项、别名、全局参数及默认 Studio 行为。单工具执行器与全量能力注册表共用独立的工具适配器，不为显式长篇写作加载全部生产能力。纯项目读取/日志工具不依赖模型客户端。
+
+本轮使用 Node.js 24.16.0 的同步模块加载钩子测量真实进程，交替六次/版本，取中位数。v1 为上游基线，v2 为本轮优化后的完整 Core + CLI 构建：
+
+| 命令 | v1 延迟 | v2 延迟 | v1 峰值 RSS | v2 峰值 RSS | 加载模块数 v1 → v2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `--help` | 1130.76 ms | 56.25 ms | 137.32 MiB | 48.62 MiB | 1772 → 17 |
+| `write next --help` | 945.20 ms | 376.98 ms | 137.48 MiB | 90.18 MiB | 1772 → 643 |
+| `status --help` | 911.70 ms | 71.64 ms | 137.20 MiB | 52.99 MiB | 1772 → 50 |
+
+三个路径的 Play、互动影片和短篇/分镜生产运行器模块数均从 27 降至 0；根帮助 Core 模块数为 0。上一轮检查点 `631eaf69` 的单次模块追踪为 974 个总模块、263 个 Core 模块，三个路径相同。与上表不同轮次的延迟不可混算。保留 Core 根入口和同步程序工厂的原始行为；完整通用 Agent/Studio 仍需要按其能力加载相关模块。此为启动和帮助路径测量，不是长篇模型写章的端到端延迟或常驻 RSS。
+
+```bash
+node benchmarks/cli-startup-replay.mjs ../inkos ../inkos-v2
+```
+
 ## Star History
 
 <a href="https://www.star-history.com/#Narcooo/inkos&type=date&legend=top-left">

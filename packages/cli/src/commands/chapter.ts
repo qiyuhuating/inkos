@@ -1,6 +1,8 @@
 import { Command } from "commander";
 import { createInterface } from "node:readline";
-import { deleteLatestChapter, StateManager, syncChapterWordCounts } from "@actalk/inkos-core";
+import { deleteLatestChapter } from "@actalk/inkos-core/state/chapter-delete";
+import { StateManager } from "@actalk/inkos-core/state/manager";
+import { syncChapterWordCounts } from "@actalk/inkos-core/state/chapter-word-sync";
 import {
   formatChapterDeleteCancelled,
   formatChapterDeleteConfirm,
@@ -11,7 +13,7 @@ import {
   formatChapterSyncSummary,
   resolveCliLanguage,
 } from "../localization.js";
-import { findProjectRoot, log, logError, resolveBookId } from "../utils.js";
+import { findProjectRoot, log, logError, resolveBookId } from "../project-io.js";
 
 export const chapterCommand = new Command("chapter")
   .description("Manage chapters");

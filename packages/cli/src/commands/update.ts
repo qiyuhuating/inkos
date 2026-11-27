@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { execSync } from "node:child_process";
-import { log, logError } from "../utils.js";
+import { log, logError } from "../project-io.js";
 
 export const updateCommand = new Command("update")
   .description("Update InkOS to the latest version")

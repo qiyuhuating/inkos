@@ -1,11 +1,8 @@
 import { Command } from "commander";
-import {
-  PipelineRunner,
-  StateManager,
-  createImportCanonTool,
-  createImportChaptersTool,
-  executeExplicitCapabilityTool,
-} from "@actalk/inkos-core";
+import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
+import { StateManager } from "@actalk/inkos-core/state/manager";
+import { createImportCanonTool, createImportChaptersTool } from "@actalk/inkos-core/agent/agent-tools";
+import { executeExplicitCapabilityTool } from "@actalk/inkos-core/harness/explicit-action";
 import { resolve } from "node:path";
 import { loadConfig, buildPipelineConfig, findProjectRoot, resolveBookId, log, logError, resolveCliProfileSkills } from "../utils.js";
 import {

@@ -1,16 +1,12 @@
 import { Command } from "commander";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, resolve, basename } from "node:path";
-import {
-  createFanficBookTool,
-  createRefreshFanficCanonTool,
-  deriveBookIdFromTitle,
-  executeExplicitCapabilityTool,
-  PlatformSchema,
-  PipelineRunner,
-  type BookConfig,
-  type FanficMode,
-} from "@actalk/inkos-core";
+import { createFanficBookTool, createRefreshFanficCanonTool } from "@actalk/inkos-core/agent/agent-tools";
+import { deriveBookIdFromTitle } from "@actalk/inkos-core/utils/book-id";
+import { executeExplicitCapabilityTool } from "@actalk/inkos-core/harness/explicit-action";
+import { PlatformSchema } from "@actalk/inkos-core/models/book";
+import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
+import type { BookConfig, FanficMode } from "@actalk/inkos-core";
 import { loadConfig, buildPipelineConfig, findProjectRoot, resolveBookId, log, logError, resolveCliProfileSkills } from "../utils.js";
 import {
   formatFanficCanonMissingError,

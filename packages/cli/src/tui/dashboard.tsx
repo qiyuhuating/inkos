@@ -1,8 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import {
-  appendInteractionMessage,
-  type InteractionSession,
-} from "@actalk/inkos-core";
+import { appendInteractionMessage } from "@actalk/inkos-core/interaction/session";
+import type { InteractionSession } from "@actalk/inkos-core";
 import { Box, Text, useApp, useInput } from "ink";
 import { processTuiAgentInput } from "./agent-input.js";
 import { describeActivityState } from "./activity-state.js";

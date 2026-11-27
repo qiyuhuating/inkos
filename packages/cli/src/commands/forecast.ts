@@ -1,13 +1,8 @@
 import { Command } from "commander";
-import {
-  FORECAST_DEFAULT_BRANCHES,
-  FORECAST_DEFAULT_HORIZON,
-  PipelineRunner,
-  createNarrativeForecast,
-  getNarrativeForecast,
-  selectNarrativeBranch,
-  type NarrativeForecast,
-} from "@actalk/inkos-core";
+import { FORECAST_DEFAULT_BRANCHES, FORECAST_DEFAULT_HORIZON } from "@actalk/inkos-core/forecast/schema";
+import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
+import { createNarrativeForecast, getNarrativeForecast, selectNarrativeBranch } from "@actalk/inkos-core/forecast/runner";
+import type { NarrativeForecast } from "@actalk/inkos-core";
 import { buildPipelineConfig, findProjectRoot, loadConfig, log, logError, resolveBookId, resolveCliProfileSkills } from "../utils.js";
 
 // CLI surface for RFC #342: create / show / select. All three operate only on
