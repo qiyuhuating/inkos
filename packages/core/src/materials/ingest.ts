@@ -7,7 +7,7 @@ import { commitAtomicFileSet } from "../utils/atomic-file-set.js";
 
 export type MaterialPurpose = string;
 export type MaterialSourceKind = "url" | "file";
-export type MaterialKind = "webpage" | "pdf" | "text";
+export type MaterialKind = "webpage" | "pdf" | "text" | "docx" | "xlsx";
 
 export interface IngestMaterialInput {
   readonly sourceKind: MaterialSourceKind;
@@ -22,7 +22,7 @@ export interface IngestMaterialInput {
 export const MaterialAssetSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
-  kind: z.enum(["webpage", "pdf", "text"]),
+  kind: z.enum(["webpage", "pdf", "text", "docx", "xlsx"]),
   purpose: z.string().trim().min(1),
   source: z.string().min(1),
   mimeType: z.string().min(1),
@@ -40,6 +40,8 @@ export interface IngestMaterialDeps {
 }
 
 const MAX_SOURCE_BYTES = 18 * 1024 * 1024;
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 export async function ingestMaterial(
   projectRoot: string,
@@ -158,6 +160,14 @@ async function extractBufferMaterial(
       totalPages: extracted.totalPages,
     };
   }
+  const ext = extname(meta.filename).toLowerCase();
+  const officeKind = ext === ".docx" || mimeType === DOCX_MIME ? "docx" : ext === ".xlsx" || mimeType === XLSX_MIME ? "xlsx" : undefined;
+  if (officeKind) {
+    const { extractDocx, extractXlsx } = await import("../utils/office-document.js");
+    const text = await (officeKind === "docx" ? extractDocx : extractXlsx)(buffer);
+    if (!text.trim()) throw new Error("Office document contains no readable text.");
+    return { kind: officeKind, source: meta.source, title: stripExtension(meta.filename), mimeType: officeKind === "docx" ? DOCX_MIME : XLSX_MIME, text };
+  }
   const raw = decodeDocumentText(buffer);
   if (isHtml(meta.filename, mimeType)) {
     return {
@@ -209,6 +219,8 @@ function renderMaterialMarkdown(input: {
 function mimeFromFilename(filename: string): string {
   const ext = extname(filename).toLowerCase();
   if (ext === ".pdf") return "application/pdf";
+  if (ext === ".docx") return DOCX_MIME;
+  if (ext === ".xlsx") return XLSX_MIME;
   if (ext === ".html" || ext === ".htm") return "text/html";
   if (ext === ".json") return "application/json";
   if (ext === ".md" || ext === ".markdown") return "text/markdown";

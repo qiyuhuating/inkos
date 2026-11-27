@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { appendFile, mkdir, readFile, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { TranscriptEventSchema, type TranscriptEvent } from "./session-transcript-schema.js";
 import type { SessionKind, TranscriptRole } from "./session-transcript-schema.js";
@@ -55,48 +55,130 @@ export async function readTranscriptEvents(
   return events.sort((a, b) => a.seq - b.seq);
 }
 
-export async function nextTranscriptSeq(projectRoot: string, sessionId: string): Promise<number> {
+interface TranscriptSequence {
+  readonly nextSeq: number;
+  readonly lastCommittedSeq: number;
+  readonly hasSessionCreated: boolean;
+}
+
+const sequenceCache = new Map<string, { fingerprint: string; state: TranscriptSequence }>();
+const MAX_SEQUENCE_CACHE = 128;
+
+async function transcriptIdentity(path: string) {
+  try {
+    const info = await stat(path, { bigint: true });
+    return { file: [info.dev, info.ino].join(":"), size: info.size, fingerprint: [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].join(":") };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function advanceSequence(state: TranscriptSequence, events: readonly TranscriptEvent[]): TranscriptSequence {
+  let { nextSeq, lastCommittedSeq, hasSessionCreated } = state;
+  for (const event of events) {
+    nextSeq = Math.max(nextSeq, event.seq + 1);
+    if (event.type === "request_committed") lastCommittedSeq = Math.max(lastCommittedSeq, event.seq);
+    if (event.type === "session_created") hasSessionCreated = true;
+  }
+  return { nextSeq, lastCommittedSeq, hasSessionCreated };
+}
+
+function retainSequence(path: string, fingerprint: string, state: TranscriptSequence): void {
+  sequenceCache.delete(path);
+  sequenceCache.set(path, { fingerprint, state });
+  if (sequenceCache.size > MAX_SEQUENCE_CACHE) sequenceCache.delete(sequenceCache.keys().next().value!);
+}
+
+async function loadSequence(projectRoot: string, sessionId: string, includeEvents: boolean) {
+  const path = resolve(transcriptPath(projectRoot, sessionId));
+  const before = await transcriptIdentity(path);
+  const cached = sequenceCache.get(path);
+  if (!includeEvents && before && cached?.fingerprint === before.fingerprint) {
+    retainSequence(path, before.fingerprint, cached.state);
+    return { path, identity: before, state: cached.state, events: [] as TranscriptEvent[] };
+  }
+  sequenceCache.delete(path);
   const events = await readTranscriptEvents(projectRoot, sessionId);
-  return events.reduce((max, event) => Math.max(max, event.seq), 0) + 1;
+  const state = advanceSequence({ nextSeq: 1, lastCommittedSeq: 0, hasSessionCreated: false }, events);
+  const after = await transcriptIdentity(path);
+  // Cache only a stable read. An external replacement must be revalidated.
+  if (before?.fingerprint !== after?.fingerprint) throw new Error("Transcript changed during read; retry the operation.");
+  const identity = after;
+  if (identity) retainSequence(path, identity.fingerprint, state);
+  return { path, identity, state, events };
+}
+
+export async function readTranscriptSequence(projectRoot: string, sessionId: string): Promise<TranscriptSequence> {
+  return (await loadSequence(projectRoot, sessionId, false)).state;
+}
+
+export async function nextTranscriptSeq(projectRoot: string, sessionId: string): Promise<number> {
+  return (await readTranscriptSequence(projectRoot, sessionId)).nextSeq;
 }
 
 export async function appendTranscriptEvent(
   projectRoot: string,
   event: TranscriptEvent,
 ): Promise<void> {
-  await appendTranscriptEvents(projectRoot, event.sessionId, () => [event]);
+  await appendTranscriptSequenceEvents(projectRoot, event.sessionId, () => [event]);
 }
 
-export async function appendTranscriptEvents(
+type TranscriptBuilder<T> = (context: T) => ReadonlyArray<TranscriptEvent> | Promise<ReadonlyArray<TranscriptEvent>>;
+
+async function appendQueued(
   projectRoot: string,
   sessionId: string,
-  buildEvents: (context: {
-    readonly events: ReadonlyArray<TranscriptEvent>;
-    readonly nextSeq: number;
-  }) => ReadonlyArray<TranscriptEvent> | Promise<ReadonlyArray<TranscriptEvent>>,
+  includeEvents: boolean,
+  buildEvents: TranscriptBuilder<TranscriptSequence & { readonly events: ReadonlyArray<TranscriptEvent> }>,
 ): Promise<TranscriptEvent[]> {
-  const key = `${projectRoot}:${sessionId}`;
+  const key = resolve(transcriptPath(projectRoot, sessionId));
   const previous = appendQueues.get(key) ?? Promise.resolve();
   let result: TranscriptEvent[] = [];
-
   const next = previous.then(async () => {
-    const events = await readTranscriptEvents(projectRoot, sessionId);
-    const nextSeq = events.reduce((max, event) => Math.max(max, event.seq), 0) + 1;
-    const built = await buildEvents({ events, nextSeq });
-    result = built.map((event) => TranscriptEventSchema.parse(event));
-    if (result.length === 0) return;
-
+    const loaded = await loadSequence(projectRoot, sessionId, includeEvents);
+    const built = await buildEvents({ ...loaded.state, events: loaded.events });
+    result = built.map(event => TranscriptEventSchema.parse(event));
+    if (!result.length) return;
+    const payload = result.map(event => JSON.stringify(event)).join("\n") + "\n";
     await mkdir(sessionsDir(projectRoot), { recursive: true });
-    await appendFile(
-      transcriptPath(projectRoot, sessionId),
-      `${result.map((event) => JSON.stringify(event)).join("\n")}\n`,
-      "utf-8",
-    );
+    const before = await transcriptIdentity(key);
+    sequenceCache.delete(key);
+    if (before?.fingerprint !== loaded.identity?.fingerprint) throw new Error("Transcript changed before append; retry the operation.");
+    await appendFile(key, payload, "utf-8");
+    const after = await transcriptIdentity(key);
+    if (after && before?.fingerprint === loaded.identity?.fingerprint
+      && (!before || before.file === after.file)
+      && after.size === (before?.size ?? 0n) + BigInt(Buffer.byteLength(payload))) {
+      retainSequence(key, after.fingerprint, advanceSequence(loaded.state, result));
+    }
   });
+  const settled = next.catch(() => undefined);
+  appendQueues.set(key, settled);
+  try {
+    await next;
+    return result;
+  } finally {
+    if (appendQueues.get(key) === settled) appendQueues.delete(key);
+  }
+}
 
-  appendQueues.set(key, next.catch(() => undefined));
-  await next;
-  return result;
+/** Existing full-history contract, for mutations whose authorization depends on earlier events. */
+export function appendTranscriptEvents(
+  projectRoot: string,
+  sessionId: string,
+  buildEvents: TranscriptBuilder<{ readonly events: ReadonlyArray<TranscriptEvent>; readonly nextSeq: number }>,
+): Promise<TranscriptEvent[]> {
+  return appendQueued(projectRoot, sessionId, true, buildEvents);
+}
+
+/** Sequence-only hot path; never retains historical message or tool payloads. */
+export function appendTranscriptSequenceEvents(
+  projectRoot: string,
+  sessionId: string,
+  buildEvents: TranscriptBuilder<TranscriptSequence>,
+): Promise<TranscriptEvent[]> {
+  return appendQueued(projectRoot, sessionId, false, buildEvents);
 }
 
 function transcriptRoleForMessage(message: AgentMessage): TranscriptRole | null {
@@ -155,7 +237,7 @@ export async function appendManualSessionMessages(
   if (persistedMessages.length === 0) return;
 
   const requestId = randomUUID();
-  await appendTranscriptEvents(projectRoot, sessionId, ({ nextSeq }) => {
+  await appendTranscriptSequenceEvents(projectRoot, sessionId, ({ nextSeq }) => {
     let seq = nextSeq;
     const events: TranscriptEvent[] = [{
       type: "request_started",

@@ -391,9 +391,17 @@ export async function runWorkerAgentTool<TParameters extends TSchema>(
           toolChoice: "required" as const,
           onPayload: (payload: unknown) => payload && typeof payload === "object" ? { ...client.defaults.extra, ...payload } : payload,
         };
+      // Narrow structured selectors need less idle time than a long draft.
+      // Reasoning models retain the larger prefill window; explicit environment
+      // overrides are still applied by the shared transport deadline.
+      const narrow = options.maxTokens !== undefined && options.maxTokens <= 2048;
+      const deadlines = {
+        firstEventTimeoutMs: narrow && !streamModel.reasoning ? 120_000 : 300_000,
+        idleTimeoutMs: narrow && !streamModel.reasoning ? 90_000 : 180_000,
+      };
       return client.stream === false
         ? guardedPiNonStreaming(streamModel, context, resultOptions, client.proxyUrl)
-        : guardedPiStream(streamModel, context, resultOptions, 1, {firstEventTimeoutMs:300_000,idleTimeoutMs:300_000});
+        : guardedPiStream(streamModel, context, resultOptions, 1, deadlines);
     },
     getApiKey: () => client._apiKey,
   });

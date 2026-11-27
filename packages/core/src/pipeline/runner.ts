@@ -9,14 +9,13 @@ import type { Logger } from "../utils/logger.js";
 import type { BookConfig, FanficMode } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
 import type { NotifyChannel, LLMConfig, AgentLLMOverride } from "../models/project.js";
-import { ArchitectAgent, type ArchitectOutput } from "../agents/architect.js";
+import type { ArchitectOutput } from "../agents/architect.js";
 import { PlannerAgent, type PlanChapterOutput } from "../agents/planner.js";
 import { ComposerAgent, contextBudgetFromClient, type ComposeChapterOutput } from "../agents/composer.js";
 import { WriterAgent, type WriteChapterInput, type WriteChapterOutput } from "../agents/writer.js";
 import { ContinuityAuditor } from "../agents/continuity.js";
-import { ReviserAgent, DEFAULT_REVISE_MODE, type ReviseMode } from "../agents/reviser.js";
-import { StateValidatorAgent, type ValidationResult } from "../agents/state-validator.js";
-import { RadarAgent } from "../agents/radar.js";
+import { DEFAULT_REVISE_MODE, type ReviseMode } from "../models/revision-mode.js";
+import type { ValidationResult } from "../agents/state-validator.js";
 import type { RadarSource } from "../agents/radar-source.js";
 import { StateManager } from "../state/manager.js";
 import { archiveChapterVersion, readChapterUserBrief } from "../state/chapter-workspace.js";
@@ -59,7 +58,6 @@ import { selectBookReferenceContext } from "../references/reference-context.js";
 import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
 import { loadAvailableAgentSkills, mergeActivatedSkillGuidance } from "../skills/index.js";
 import { commitAtomicFileSet } from "../utils/atomic-file-set.js";
-import { compileStyleGuide } from "../agents/style-guide.js";
 import { compileImportSource, renderCompleteImportSource } from "../agents/import-context.js";
 
 function mergeChapterRevisionInstructions(
@@ -433,7 +431,7 @@ export class PipelineRunner {
     const marketSkill = [...available.skills].reverse().find((skill) => skill.id === "inkos-long-market-research");
     if (!marketSkill) throw new Error("Radar requires unavailable skill: inkos-long-market-research");
     const baseContext = this.agentCtxFor("radar");
-    const radar = new RadarAgent({
+    const radar = new (await import("../agents/radar.js")).RadarAgent({
       ...baseContext,
       activatedSkills: mergeActivatedSkillGuidance(
         baseContext.activatedSkills ?? [],
@@ -452,7 +450,7 @@ export class PipelineRunner {
       await syncWorkSourceArtifacts({ projectRoot: this.config.projectRoot, workId: book.id, accept: true, acceptPaths: foundationPaths });
       return;
     }
-    const architect = new ArchitectAgent(this.agentCtxFor("architect", book.id));
+    const architect = new (await import("../agents/architect.js")).ArchitectAgent(this.agentCtxFor("architect", book.id));
     const bookDir = this.state.bookDir(book.id);
     const stagingBookDir = join(
       this.state.booksDir,
@@ -583,7 +581,7 @@ export class PipelineRunner {
       readCharacterContext(bookDir),
     ]);
 
-    const architect = new ArchitectAgent(this.agentCtxFor("architect", bookId));
+    const architect = new (await import("../agents/architect.js")).ArchitectAgent(this.agentCtxFor("architect", bookId));
     const foundation = await architect.generateFoundation(book, undefined, undefined, {
       reviseFrom: {
         storyFrame: oldStoryFrame,
@@ -618,7 +616,7 @@ export class PipelineRunner {
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     }
     context.push(feedback);
-    const architect = new ArchitectAgent(this.agentCtxFor("architect", bookId));
+    const architect = new (await import("../agents/architect.js")).ArchitectAgent(this.agentCtxFor("architect", bookId));
     try {
       const foundation = await architect.generateFoundation(book, context.join("\n\n"));
       await architect.writeFoundationFiles(bookDir, foundation, book.language, "revise");
@@ -704,7 +702,7 @@ export class PipelineRunner {
       this.logStage(stageLanguage, { zh: "导入同人正典", en: "importing fanfic canon" });
       const fanficCanon = await this.importFanficCanon(book.id, sourceText, sourceName, fanficMode, { accept: false });
 
-      const architect = new ArchitectAgent(this.agentCtxFor("architect", book.id));
+      const architect = new (await import("../agents/architect.js")).ArchitectAgent(this.agentCtxFor("architect", book.id));
       this.logStage(stageLanguage, { zh: "生成同人基础设定", en: "generating fanfic foundation" });
       const foundation = await architect.generateFanficFoundation(book, fanficCanon, fanficMode, undefined, {
         onOutline: (outline) => this.persistDraftFoundationOutline(book.id, outline),
@@ -745,7 +743,7 @@ export class PipelineRunner {
       this.logStage(stageLanguage, { zh: "导入正传正典参照", en: "importing parent canon" });
       const parentCanon = await this.importCanon(book.id, parentBookId);
 
-      const architect = new ArchitectAgent(this.agentCtxFor("architect", book.id));
+      const architect = new (await import("../agents/architect.js")).ArchitectAgent(this.agentCtxFor("architect", book.id));
       const resolvedLanguage = book.language;
       const spinoffContext = buildSpinoffFoundationContext(parentCanon, direction, resolvedLanguage);
 
@@ -960,7 +958,7 @@ export class PipelineRunner {
       const authorityContext = {storyFrame:authorityStoryFrame,bookRules:authorityBookRules,
         chapterSummaries:renderChapterSummariesProjection(baselineSnapshot.chapterSummaries,language)};
 
-      const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
+      const reviser = new (await import("../agents/reviser.js")).ReviserAgent(this.agentCtxFor("reviser", bookId));
       this.logStage(stageLanguage, {
         zh: `修订第${targetChapter}章`,
         en: `revising chapter ${targetChapter}`,
@@ -988,7 +986,7 @@ export class PipelineRunner {
       const changed = revisedContent !== content;
       const revisedCount = countChapterLength(revisedContent, lengthSpec.countingMode);
       const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
-      const stateValidator = new StateValidatorAgent(this.agentCtxFor("stateValidator", bookId));
+      const stateValidator = new (await import("../agents/state-validator.js")).StateValidatorAgent(this.agentCtxFor("stateValidator", bookId));
       let settledRevision = await writer.settleChapterState({
         book,
         bookDir,
@@ -1383,7 +1381,7 @@ export class PipelineRunner {
     const oldState = renderCurrentStateProjection(runtimeSnapshot.currentState, pipelineLang);
     const oldHooks = renderHooksProjection(runtimeSnapshot.hooks, pipelineLang);
     const authorityChapterSummaries = renderChapterSummariesProjection(runtimeSnapshot.chapterSummaries, pipelineLang);
-    const validator = new StateValidatorAgent(this.agentCtxFor("state-validator", bookId));
+    const validator = new (await import("../agents/state-validator.js")).StateValidatorAgent(this.agentCtxFor("state-validator", bookId));
     const truthValidation = await validateChapterTruthPersistence({
       writer,
       validator,
@@ -1527,7 +1525,7 @@ export class PipelineRunner {
       contextPackage: reducedControlInput.contextPackage,
       allowReapply: true,
     });
-    const validator = new StateValidatorAgent(this.agentCtxFor("state-validator", bookId));
+    const validator = new (await import("../agents/state-validator.js")).StateValidatorAgent(this.agentCtxFor("state-validator", bookId));
     let validation = await validator.validate(
       content,
       targetChapter,
@@ -1608,7 +1606,7 @@ export class PipelineRunner {
     await mkdir(storyDir, { recursive: true });
     const book = await this.state.loadBookConfig(bookId);
     const language = book.language;
-    const guide = await compileStyleGuide({
+    const guide = await (await import("../agents/style-guide.js")).compileStyleGuide({
       client: this.config.client,
       model: this.config.model,
       projectRoot: this.config.projectRoot,
@@ -1708,7 +1706,7 @@ export class PipelineRunner {
           }, null, 2), "utf-8");
         }
 
-        const architect = new ArchitectAgent(this.agentCtxFor("architect", input.bookId));
+        const architect = new (await import("../agents/architect.js")).ArchitectAgent(this.agentCtxFor("architect", input.bookId));
         const isSeries = input.importMode === "series";
         const foundation = await architect.generateFoundationFromImport(
           book,

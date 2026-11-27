@@ -205,12 +205,16 @@ describe("Pi worker harness", () => {
           status: Type.String(),
         }),
       },
+      {maxTokens: 1024},
     );
 
     expect(result).toEqual({ label: "母亲", status: "等待退烧药" });
     expect(guardedPiStreamMock).toHaveBeenCalledTimes(1);
     expect(guardedPiStreamMock.mock.calls[0]?.[2]).toMatchObject({
       toolChoice: "required",
+    });
+    expect(guardedPiStreamMock.mock.calls[0]?.[4]).toEqual({
+      firstEventTimeoutMs:120_000, idleTimeoutMs:90_000,
     });
   });
 

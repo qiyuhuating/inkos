@@ -1,8 +1,4 @@
 import { Command } from "commander";
-import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
-import { loadWorkManifest } from "@actalk/inkos-core/harness/work-store";
-import { runAgentSession } from "@actalk/inkos-core/agent/agent-session";
-import { buildPipelineConfig, createClient, findProjectRoot, loadConfig } from "../utils.js";
 
 export interface InteractCommandHooks {
   readonly readInput?: () => Promise<string>;
@@ -55,6 +51,10 @@ export function createInteractCommand(hooks: InteractCommandHooks = {}): Command
     .option("--json", "Emit structured JSON for external agents")
     .action(async (messageArgs: ReadonlyArray<string>, opts) => {
       const input = await readInteractionInput(messageArgs, opts.message, hooks.readInput);
+        const { PipelineRunner } = await import("@actalk/inkos-core/pipeline/runner");
+        const { loadWorkManifest } = await import("@actalk/inkos-core/harness/work-store");
+        const { runAgentSession } = await import("@actalk/inkos-core/agent/agent-session");
+        const { buildPipelineConfig, createClient, findProjectRoot, loadConfig } = await import("../utils.js");
       const projectRoot = findProjectRoot();
       const config = await loadConfig({ requireApiKey: false, projectRoot });
       const client = createClient(config);

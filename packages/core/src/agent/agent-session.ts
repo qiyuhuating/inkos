@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { stat } from "node:fs/promises";
 import { Agent } from "@mariozechner/pi-agent-core";
 import { preserveToolArgumentTypes } from "./tool-arguments.js";
 import { createTurnCompletionTool, TurnArtifactDeliveries, TURN_COMPLETION_GUIDANCE, TURN_COMPLETION_TOOL, type TurnCompletion } from "./turn-completion.js";
@@ -27,8 +28,9 @@ import { resolveSessionHarnessBinding } from "../harness/session-binding.js";
 import { loadWorkManifest } from "../harness/work-store.js";
 import type { WorkManifest, WorkProfile, ActionResult } from "../harness/contracts.js";
 import {
-  appendTranscriptEvents,
-  readTranscriptEvents,
+  appendTranscriptSequenceEvents,
+  readTranscriptSequence,
+  transcriptPath,
 } from "../interaction/session-transcript.js";
 import {
   adaptRestoredAgentMessagesForModel,
@@ -214,6 +216,7 @@ interface CachedAgent {
   suppressProductionTools: boolean;
   currentAttachmentPaths: string[];
   lastCommittedSeq: number;
+  historyBytes: number;
   lastActive: number;
 }
 
@@ -238,6 +241,28 @@ function removeCachedAgent(key: string, cancelRunningEpisode = false): boolean {
 
 /** TTL for cached agents: 5 minutes. */
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_IDLE_AGENTS = 16;
+const MAX_CACHED_MESSAGES = 512;
+const MAX_IDLE_HISTORY_BYTES = 32 * 1024 * 1024;
+
+function trimIdleAgents(): void {
+  const idle = [...agentCache].filter(([key, entry]) =>
+    entry.currentEpisode === null && !agentSessionQueues.has(key));
+  const retained = idle.filter(([key, entry]) => {
+    if (entry.agent.state.messages.length <= MAX_CACHED_MESSAGES && entry.historyBytes <= MAX_IDLE_HISTORY_BYTES) return true;
+    removeCachedAgent(key);
+    return false;
+  }).sort((a, b) => a[1].lastActive - b[1].lastActive);
+  let remaining = retained.length;
+  let bytes = retained.reduce((sum, [, entry]) => sum + entry.historyBytes, 0);
+  for (const [key, entry] of retained) {
+    if (remaining <= MAX_IDLE_AGENTS && bytes <= MAX_IDLE_HISTORY_BYTES) break;
+    if (removeCachedAgent(key)) {
+      remaining--;
+      bytes -= entry.historyBytes;
+    }
+  }
+}
 
 /** Cleanup interval handle (lazy-started). */
 let cleanupTimer: ReturnType<typeof setInterval> | null = null;
@@ -247,7 +272,7 @@ function ensureCleanupTimer(): void {
   cleanupTimer = setInterval(() => {
     const now = Date.now();
     for (const [id, entry] of agentCache) {
-      if (entry.currentEpisode === null && now - entry.lastActive > CACHE_TTL_MS) {
+      if (entry.currentEpisode === null && !agentSessionQueues.has(id) && now - entry.lastActive > CACHE_TTL_MS) {
         removeCachedAgent(id);
       }
     }
@@ -421,18 +446,27 @@ async function runInAgentSessionQueue<T>(
   try {
     return await task();
   } finally {
+    // The on-disk transcript is a conservative size proxy for idle history,
+    // including tool payloads. Do not truncate active model context.
+    const entry = agentCache.get(key);
+    if (entry) {
+      try {
+        entry.historyBytes = (await stat(transcriptPath(projectRoot, sessionId))).size;
+      } catch {
+        entry.historyBytes = Infinity; // don't retain an unaccounted session
+      }
+      entry.lastActive = Date.now();
+    }
     release();
     if (agentSessionQueues.get(key) === queued) {
       agentSessionQueues.delete(key);
+      trimIdleAgents();
     }
   }
 }
 
 async function latestCommittedSeq(projectRoot: string, sessionId: string): Promise<number> {
-  const events = await readTranscriptEvents(projectRoot, sessionId);
-  return events
-    .filter((event) => event.type === "request_committed")
-    .reduce((max, event) => Math.max(max, event.seq), 0);
+  return (await readTranscriptSequence(projectRoot, sessionId)).lastCommittedSeq;
 }
 
 function transcriptRoleForMessage(message: AgentMessage): TranscriptRole | null {
@@ -484,8 +518,8 @@ async function ensureSessionCreatedEvent(
   profileId?: string,
   workId?: string | null,
 ): Promise<void> {
-  await appendTranscriptEvents(projectRoot, sessionId, ({ events, nextSeq }) => {
-    if (events.some((event) => event.type === "session_created")) return [];
+  await appendTranscriptSequenceEvents(projectRoot, sessionId, ({ hasSessionCreated, nextSeq }) => {
+    if (hasSessionCreated) return [];
 
     const now = Date.now();
     return [{
@@ -510,7 +544,7 @@ async function appendAgentTranscriptEvent(
   sessionId: string,
   buildEvent: (seq: number) => TranscriptEvent,
 ): Promise<TranscriptEvent> {
-  const events = await appendTranscriptEvents(projectRoot, sessionId, ({ nextSeq }) => [
+  const events = await appendTranscriptSequenceEvents(projectRoot, sessionId, ({ nextSeq }) => [
     buildEvent(nextSeq),
   ]);
   const event = events[0];
@@ -1171,6 +1205,7 @@ async function runAgentSessionUnlocked(
         .map((attachment) => attachment.storedPath?.trim())
         .filter((path): path is string => Boolean(path)),
       lastCommittedSeq: currentCommittedSeq ?? await latestCommittedSeq(projectRoot, sessionId),
+      historyBytes: 0,
       lastActive: Date.now(),
     };
     agentCache.set(cacheKey, cached);

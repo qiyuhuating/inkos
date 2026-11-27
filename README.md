@@ -732,6 +732,29 @@ node benchmarks/cli-startup-replay.mjs ../inkos ../inkos-v2
 
 相关 Play/影片/短篇及分镜运行器路径数从 26 降至 7（包含新增的独立变量类型校验模块）。单次峰值 RSS 分别约 116.2 → 105.1 MiB、116.1 → 100.7 MiB；仅为初步观测，不视作长期内存基准。Core 定向 86 项测试及 CLI 全部 90 项测试通过。没有在线模型写作质量对照，也未改动 SDK 初始化、长会话缓存容量、超时策略或跨任务 SQLite 池。
 
+### 会话日志、空闲缓存与 Office 素材
+
+- 普通会话事件追加仅缓存文件身份与 nextSeq、lastCommittedSeq、hasSessionCreated（至多 128 个条目），无需反复解析全量历史；文件变更时重新读取，检测到追加前的外部冲突则拒绝操作。依赖历史授权判断的调用仍走完整事件接口；进程内追加队列结束即释放。该机制未引入跨进程互斥，不能保证独立进程同时写同一日志的事务隔离。
+- 空闲 Agent 按最后使用时间淘汰，最多保留 16 个空闲会话、单会话至多 512 条消息、合计 32 MiB 的磁盘日志大小预算。日志大小是序列化历史量代理，不是进程堆的硬限制；活跃任务和完整历史均不截断。淘汰时释放 episode SQLite 连接，下次从已提交记录恢复。
+- Pi AI 0.67.1 已经懒加载各供应商 SDK，不重复造加载器。Agent/Interact 的帮助路径不初始化 Core；管线的 Architect、Radar、Reviser、StateValidator、StyleGuide 实现在使用时导入。结构化流式任务在显式输出预算至多 2048 且模型非推理时使用 120s 首事件/90s 空闲超时，其余使用 300s/180s；环境覆盖及非流式请求总超时保留。
+- `ingest_material` 支持 DOCX 正文及表格和 XLSX 工作表、坐标、共享字符串、布尔值及公式缓存的文本提取；不会执行公式。使用现有 JSZip 和锁文件中已存在的 fast-xml-parser 5.5.8（本轮新增直接依赖），按需加载。压缩输入仍遵循 18 MiB 素材限制，Office XML 解压总量最多 32 MiB、提取文本最多 8 Mi 字符，拒绝 DTD/实体声明。暂不支持完整原版式编辑、旧二进制 DOC/XLS、扫描 OCR 或 DOCX 翻译专用入口。
+
+本轮日志基准：预置 1000 条约 2.91 MB 事件，再追加 100 条，交替六轮/版本，原版中位数 1888.188 ms，本轮 72.147 ms（26.2 倍）；最终 1100 条事件逐项一致。
+
+单次模块追踪（上一检查点 `39068ef8` → 本轮）：
+
+| 命令 | 总模块 | Core 模块 |
+| --- | ---: | ---: |
+| `agent --help` | 707 → 19 | 219 → 0 |
+| `interact --help` | 707 → 18 | 219 → 0 |
+| `write next --help` | 643 → 633 | 152 → 142 |
+
+```bash
+node benchmarks/session-transcript-replay.mjs ../inkos ../inkos-v2 benchmarks/chapter-001.md
+```
+
+没有在线模型或完整长会话堆内存对照，保持上一版的创作自主性策略；SQLite 跨任务连接池和进一步提示词压缩未实施。
+
 ## Star History
 
 <a href="https://www.star-history.com/#Narcooo/inkos&type=date&legend=top-left">

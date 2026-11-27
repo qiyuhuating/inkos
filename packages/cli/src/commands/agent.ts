@@ -1,8 +1,5 @@
 import { Command } from "commander";
-import { loadWorkManifest } from "@actalk/inkos-core/harness/work-store";
-import { PipelineRunner } from "@actalk/inkos-core/pipeline/runner";
-import { runAgentSession } from "@actalk/inkos-core/agent/agent-session";
-import { buildPipelineConfig, loadConfig, createClient, findProjectRoot, resolveBookId, resolveContext, log, logError } from "../utils.js";
+import { log, logError } from "../project-io.js";
 
 export const agentCommand = new Command("agent")
   .description("Natural language agent mode (LLM orchestrates via tool-use)")
@@ -16,6 +13,10 @@ export const agentCommand = new Command("agent")
   .option("--quiet", "Suppress non-JSON console output")
   .action(async (instruction: string, opts) => {
     try {
+      const { loadWorkManifest } = await import("@actalk/inkos-core/harness/work-store");
+      const { PipelineRunner } = await import("@actalk/inkos-core/pipeline/runner");
+      const { runAgentSession } = await import("@actalk/inkos-core/agent/agent-session");
+      const { buildPipelineConfig, loadConfig, createClient, findProjectRoot, resolveBookId, resolveContext } = await import("../utils.js");
       const config = await loadConfig();
       const client = createClient(config);
       const root = findProjectRoot();

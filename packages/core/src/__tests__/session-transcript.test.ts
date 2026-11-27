@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import {
   appendManualSessionMessages,
   appendTranscriptEvents,
+  appendTranscriptSequenceEvents,
+  readTranscriptSequence,
   appendTranscriptEvent,
   nextTranscriptSeq,
   readTranscriptEvents,
@@ -126,6 +128,30 @@ describe("session transcript codec", () => {
     );
 
     await expect(readTranscriptEvents(projectRoot, "s1")).rejects.toThrow("Invalid transcript event");
+  });
+
+  it("allocates sequence numbers incrementally, recovers after a rejected builder and invalidates rewritten files", async () => {
+    const sessionId = "indexed";
+    const start = (seq: number): RequestStartedEvent => ({
+      type: "request_started", version: 1, sessionId, seq, requestId: "r"+seq, timestamp: seq, input: "text",
+    });
+    await Promise.all(Array.from({length: 20}, () =>
+      appendTranscriptSequenceEvents(projectRoot, sessionId, ({nextSeq}) => [start(nextSeq)])));
+    expect((await readTranscriptEvents(projectRoot, sessionId)).map(event => event.seq)).toEqual(Array.from({length:20},(_,i)=>i+1));
+    await expect(appendTranscriptSequenceEvents(projectRoot, sessionId, () => {throw new Error("rejected");})).rejects.toThrow("rejected");
+    await appendTranscriptSequenceEvents(projectRoot, sessionId, ({nextSeq}) => [{
+      type:"request_committed",version:1,sessionId,seq:nextSeq,requestId:"r20",timestamp:21,
+    }]);
+    expect(await readTranscriptSequence(projectRoot,sessionId)).toEqual({nextSeq:22,lastCommittedSeq:21,hasSessionCreated:false});
+    const path=transcriptPath(projectRoot,sessionId);
+    await writeFile(path,JSON.stringify(start(100))+"\n");
+    expect(await nextTranscriptSeq(projectRoot,sessionId)).toBe(101);
+    await appendTranscriptSequenceEvents(projectRoot,sessionId,({nextSeq})=>[start(nextSeq)]);
+    expect((await readTranscriptEvents(projectRoot,sessionId)).map(event=>event.seq)).toEqual([100,101]);
+    await writeFile(path,"{bad json\n");
+    await expect(nextTranscriptSeq(projectRoot,sessionId)).rejects.toThrow("Invalid transcript event");
+    await rm(path);
+    expect(await nextTranscriptSeq(projectRoot,sessionId)).toBe(1);
   });
 
   it("按已有 transcript 分配单调递增 seq", async () => {

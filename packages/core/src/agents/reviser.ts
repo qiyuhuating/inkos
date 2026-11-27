@@ -11,9 +11,8 @@ import { ChapterRewriteToolSchema } from "./reviser-tool.js";
 import {chapterDocumentBody} from '../utils/chapter-document.js';
 import { renderNarrativeSelectedContext } from "../utils/narrative-control.js";
 
-export type ReviseMode = "polish" | "rewrite" | "rework" | "anti-detect" | "spot-fix";
-
-export const DEFAULT_REVISE_MODE: ReviseMode = "rewrite";
+import { DEFAULT_REVISE_MODE, type ReviseMode } from "../models/revision-mode.js";
+export { DEFAULT_REVISE_MODE, type ReviseMode } from "../models/revision-mode.js";
 
 export interface ReviseOutput {
   readonly revisedContent: string;

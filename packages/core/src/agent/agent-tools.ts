@@ -833,7 +833,7 @@ const IngestMaterialParams = Type.Object({
     description: "Use url for an external URL; use file for a user-uploaded file path shown in the Uploaded Files block.",
   }),
   url: Type.Optional(Type.String({
-    description: "HTTP/HTTPS URL to fetch and extract. Supports HTML/text/JSON/PDF.",
+    description: "HTTP/HTTPS URL to fetch and extract. Supports HTML/text/JSON/PDF/DOCX/XLSX.",
   })),
   filePath: Type.Optional(Type.String({
     description: "Project-relative stored_path from the Uploaded Files block, e.g. .inkos/uploads/session/file.pdf.",
@@ -859,7 +859,7 @@ export function createIngestMaterialTool(projectRoot: string): AgentTool<typeof 
     name: "ingest_material",
     description:
       "Extract and archive a user-provided URL or uploaded file into .inkos/materials as traceable Markdown. " +
-      "Supports HTML/text/JSON/Markdown/PDF. This creates reference material only; it must not mutate canon, chapters, scripts, or play state.",
+      "Supports HTML/text/JSON/Markdown/PDF/DOCX/XLSX. Office files are extracted as searchable text with table structure or cell references. This creates reference material only; it must not mutate canon, chapters, scripts, or play state.",
     label: "Ingest Material",
     parameters: IngestMaterialParams,
     async execute(

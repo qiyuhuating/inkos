@@ -52,6 +52,28 @@ function finishResponse(status: 'answered' | 'delivered' | 'needs_input' | 'bloc
 }
 
 describe("guardedPiNonStreaming", () => {
+  it("evicts the oldest idle Agent and restores the committed conversation on demand", async () => {
+    const root=await mkdtemp(join(tmpdir(),"inkos-idle-agents-"));
+    const ids=Array.from({length:17},(_,index)=>"idle-fixture-"+index);
+    const config={projectRoot:root,bookId:null,workId:null,profileId:"workspace-default",sessionKind:"chat" as const,language:"en",model,apiKey:"fixture",stream:false,pipeline:{} as never};
+    fetchWithProxyMock.mockImplementation(async()=>finishResponse("answered","Answered."));
+    try {
+      for(const [index,sessionId] of ids.entries()){
+        const result=await runAgentSession({...config,sessionId},"Remember conversation "+index);
+        expect(result.responseText).toBe("Answered.");
+      }
+      expect(evictAgentCache(ids[0]!)).toBe(false);
+      expect(evictAgentCache(ids[16]!)).toBe(true);
+      const restored=await runAgentSession({...config,sessionId:ids[0]!},"Continue.");
+      expect(restored.responseText).toBe("Answered.");
+      expect(JSON.stringify(restored.messages)).toContain("Remember conversation 0");
+      const history=await readTranscriptEvents(root,ids[0]!);
+      expect(history.filter(event=>event.type==="request_committed")).toHaveLength(2);
+    }finally{
+      for(const id of ids)evictAgentCache(id);
+      await rm(root,{recursive:true,force:true});
+    }
+  });
   it('keeps a native creation entry focused on its selected producer without executing it automatically',async()=>{
     const root=await mkdtemp(join(tmpdir(),'inkos-creation-entry-'));let tools:string[]=[];
     fetchWithProxyMock.mockImplementation(async(_url:string,init:RequestInit)=>{const body=JSON.parse(String(init.body));tools=body.tools.map((t:any)=>t.function.name);return finishResponse('needs_input','Select a source.');});
