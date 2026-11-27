@@ -1,7 +1,8 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { safeChildPath } from "../utils/path-safety.js";
 import { toPosixPath } from "../utils/posix-path.js";
+import { FingerprintFileCache } from "../utils/fingerprint-file-cache.js";
 import { MaterialAssetSchema, type MaterialAsset, type MaterialPurpose } from "./ingest.js";
 import {
   LocalSearchIndex,
@@ -31,6 +32,8 @@ export interface RetrievedMaterial {
 const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 12;
 const MATERIAL_SCOPE = "archived-materials";
+const materialSegments = new FingerprintFileCache(splitMarkdownForSearch);
+const materialMetadata = new FingerprintFileCache(text => MaterialAssetSchema.parse(JSON.parse(text)), 256, 1024 * 1024);
 
 export async function retrieveMaterials(
   projectRoot: string,
@@ -40,9 +43,9 @@ export async function retrieveMaterials(
   const documents: SearchDocument[] = [];
   for (const asset of assets) {
     const markdownPath = safeChildPath(projectRoot, asset.markdownPath);
-    const markdown = await readFile(markdownPath, "utf-8");
+    const segments = await materialSegments.read(markdownPath);
     const normalizedPath = toPosixPath(asset.markdownPath);
-    splitMarkdownForSearch(markdown).forEach((segment, index) => {
+    segments.forEach((segment, index) => {
       documents.push({
         id: `material:${asset.id}:${index}`,
         scope: MATERIAL_SCOPE,
@@ -96,8 +99,7 @@ async function listMaterialAssets(projectRoot: string): Promise<MaterialAsset[]>
   const assets: MaterialAsset[] = [];
   for (const entry of entries) {
     if (!entry.endsWith(".json")) continue;
-    const raw = await readFile(join(materialsDir, entry), "utf-8");
-    assets.push(MaterialAssetSchema.parse(JSON.parse(raw)));
+    assets.push(await materialMetadata.read(join(materialsDir, entry)));
   }
   return assets;
 }

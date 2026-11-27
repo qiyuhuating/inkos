@@ -1,4 +1,4 @@
-import { readFile, mkdir, readdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { BaseAgent } from "./base.js";
 import { SemanticContextCompilerAgent } from "./semantic-context-compiler.js";
@@ -33,6 +33,9 @@ import type {
 import { Type } from "@sinclair/typebox";
 import { loadRuntimeStateSnapshot } from "../state/runtime-state-store.js";
 import { recordExecutionEvidence } from "../harness/execution-evidence.js";
+import { FingerprintFileCache } from "../utils/fingerprint-file-cache.js";
+
+const contextFiles = new FingerprintFileCache(text => text, 512);
 
 export interface ComposeChapterInput {
   readonly book: BookConfig;
@@ -797,7 +800,7 @@ async function readRoleCardCandidates(storyDir: string): Promise<OutlineSectionS
     candidates.push(...await Promise.all(files.slice(offset, offset + 16).map(async ({ tier, directory, file }) => ({
       source: "story/roles/" + tier + "/" + file,
       heading: file.slice(0, -3),
-      excerpt: (await readFile(join(directory, file), "utf-8")).trim(),
+      excerpt: (await contextFiles.read(join(directory, file))).trim(),
     }))));
   }
   return candidates;
@@ -960,7 +963,7 @@ function dedupeBySource(entries: ContextPackage["selectedContext"]): ContextPack
 
 async function readFileOrDefault(path: string): Promise<string> {
   try {
-    return await readFile(path, "utf-8");
+    return await contextFiles.read(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
     throw error;

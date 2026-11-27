@@ -638,6 +638,37 @@ describe("guardedPiNonStreaming", () => {
     expect(fetchWithProxyMock).toHaveBeenCalledTimes(calls);
   });
 
+  it("reuses exact review anchors in one model call and preserves every other source line", async () => {
+    const client=createLLMClient({provider:"openai",service:"custom",configSource:"studio",baseUrl:model.baseUrl,model:model.id,apiKey:"fixture",apiFormat:"chat",stream:false,temperature:0,thinkingBudget:0});
+    const original="First line stays.\r\nWrong door.\r\n\nMiddle stays.\nWrong coat.\nLast line stays.";
+    const observations=[
+      {code:"door",summary:"Correct the door colour.",category:"quality" as const,assessment:"issue" as const,evidence:[],sourceRefs:[{sourceId:"chapter-1",quote:"Wrong door.\r"}]},
+      {code:"coat",summary:"Correct the coat.",category:"quality" as const,assessment:"issue" as const,evidence:[],sourceRefs:[{sourceId:"chapter-1",quote:"Wrong coat."}]},
+    ];
+    const calls:string[]=[];
+    fetchWithProxyMock.mockImplementation(async(_url:string,init:RequestInit)=>{
+      const body=JSON.parse(String(init.body));
+      const name=body.tools[0].function.name; calls.push(name);
+      const args={range_0_content:"Blue door.\r\n",range_1_content:"Red coat.\n"};
+      return new Response(JSON.stringify({choices:[{finish_reason:"tool_calls",message:{tool_calls:[{id:"bound",type:"function",function:{name,arguments:JSON.stringify(args)}}]}}]}));
+    });
+    const reviser=new ReviserAgent({client,model:model.id,projectRoot:"/tmp"});
+    const options={language:"en" as const,contextPackage:{chapter:1,selectedContext:[]}};
+    const result=await reviser.reviseChapter("/tmp",original,1,observations,"spot-fix",undefined,options);
+    expect(result.revisedContent).toBe("First line stays.\r\nBlue door.\r\n\nMiddle stays.\nRed coat.\nLast line stays.");
+    expect(calls).toEqual(["submit_chapter_range_replacements"]);
+    calls.length=0;
+    const repeated="First line stays.\nWrong coat.\nMiddle stays.\nWrong coat.\nLast line stays.";
+    fetchWithProxyMock.mockImplementation(async(_url:string,init:RequestInit)=>{
+      const name=JSON.parse(String(init.body)).tools[0].function.name; calls.push(name);
+      const args=name==="submit_chapter_edit_ranges"?{ranges:[{startLine:4,endLine:4}]}:{range_0_content:"Red coat.\n"};
+      return new Response(JSON.stringify({choices:[{finish_reason:"tool_calls",message:{tool_calls:[{id:"fallback",type:"function",function:{name,arguments:JSON.stringify(args)}}]}}]}));
+    });
+    const fallback=await reviser.reviseChapter("/tmp",repeated,1,[observations[1]!],"spot-fix",undefined,options);
+    expect(fallback.revisedContent).toBe("First line stays.\nWrong coat.\nMiddle stays.\nRed coat.\nLast line stays.");
+    expect(calls).toEqual(["submit_chapter_edit_ranges","submit_chapter_range_replacements"]);
+  });
+
   it("preserves output-limit termination and never executes truncated tool arguments", async () => {
     fetchWithProxyMock.mockImplementation(async () => new Response(JSON.stringify({
       choices: [{ finish_reason: "length", message: { tool_calls: [{

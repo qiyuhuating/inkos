@@ -5,7 +5,8 @@ import type { ContextPackage } from "../models/input-governance.js";
 import { countChapterLength, assertChapterLength } from "../utils/length-metrics.js";
 import { Type } from '@sinclair/typebox';
 import { numberReviewSource } from '../models/observation.js';
-import {textRangeEditContract,textSelectionEditContract,TextEditRangeSchema} from '../utils/text-range-edits.js';
+import {textRangeEditContract,textSelectionEditContract,TextEditRangeSchema,type TextEditRange} from '../utils/text-range-edits.js';
+import {sourceLineBodies} from '../utils/source-text.js';
 import { ChapterRewriteToolSchema } from "./reviser-tool.js";
 import {chapterDocumentBody} from '../utils/chapter-document.js';
 import { renderNarrativeSelectedContext } from "../utils/narrative-control.js";
@@ -64,7 +65,9 @@ export class ReviserAgent extends BaseAgent {
           ? `\n## Length contract\n${JSON.stringify({...options.lengthSpec,currentCount:countChapterLength(chapterContent,options.lengthSpec.countingMode),unit:"words"})}`
           : `\n## 篇幅要求\n${JSON.stringify({...options.lengthSpec,currentCount:countChapterLength(chapterContent,options.lengthSpec.countingMode),unit:"正文非空白字符，含标点，不含标题"})}`)
       : "";
-    const systemPrompt = buildRevisionProtocol(mode, options.language);
+    const anchoredRanges = mode === "spot-fix" && options.targetText === undefined
+      ? reviewEditRanges(chapterContent, chapterNumber, observations) : undefined;
+    const systemPrompt = buildRevisionProtocol(mode, options.language, Boolean(anchoredRanges) || options.targetText !== undefined);
     const source=mode==='spot-fix'?numberReviewSource(chapterContent):chapterContent;
     const userPrompt = isEnglish
       ? `Revise chapter ${chapterNumber}.\n\n## Observations or instruction\n${observationList}\n\n## Governed context\n${context}${lengthBlock}\n\n## Current chapter\n${source}`
@@ -75,7 +78,7 @@ export class ReviserAgent extends BaseAgent {
     ];
     const outputBudget = Math.min(this.ctx.client.defaults.maxTokens, Math.max(8192, Math.ceil((options.lengthSpec?.target ?? chapterContent.length) * 4) + 8192));
     const output = mode === "spot-fix" || options.targetText!==undefined
-      ? await this.submitSpotFix(messages, chapterContent, outputBudget, options.lengthSpec,options.targetText,options.onCandidate)
+      ? await this.submitSpotFix(messages, chapterContent, outputBudget, options.lengthSpec,options.targetText,options.onCandidate,anchoredRanges)
       : await this.submitRewrite(messages, outputBudget, options.lengthSpec,body);
     const wordCount = options.lengthSpec
       ? countChapterLength(output.revisedContent, options.lengthSpec.countingMode)
@@ -90,10 +93,12 @@ export class ReviserAgent extends BaseAgent {
     lengthSpec?: LengthSpec,
     targetText?:string,
     onCandidate?: (content: string) => Promise<void>,
+    anchoredRanges?: readonly TextEditRange[],
   ): Promise<ReviseOutput> {
     let planUsage={promptTokens:0,completionTokens:0,totalTokens:0};
     let contract:ReturnType<typeof textRangeEditContract>|ReturnType<typeof textSelectionEditContract>;
     if(targetText!==undefined)contract=textSelectionEditContract(originalChapter,targetText);
+    else if (anchoredRanges) contract=textRangeEditContract(originalChapter,anchoredRanges);
     else{
     const plan=await this.submitStructured(messages,{
       name:'submit_chapter_edit_ranges',label:'Select chapter edit ranges',
@@ -164,7 +169,44 @@ export class ReviserAgent extends BaseAgent {
   }
 }
 
-function buildRevisionProtocol(mode: ReviseMode, language: "zh" | "en"): string {
+/** Only skip range planning when every finding has a uniquely matched full-line
+ * excerpt in this chapter. Ambiguous, stale or non-local evidence stays on the
+ * existing model-assisted range-selection path. */
+function reviewEditRanges(content: string, chapter: number, observations: readonly Observation[]): TextEditRange[] | undefined {
+  if (!observations.length) return undefined;
+  const lines = sourceLineBodies(content);
+  const ranges: TextEditRange[] = [];
+  for (const observation of observations) {
+    if (observation.category !== "quality" || observation.assessment !== "issue") return undefined;
+    const refs = observation.sourceRefs?.filter(ref => ref.sourceId === "chapter-" + chapter) ?? [];
+    if (!refs.length) return undefined;
+    for (const ref of refs) {
+      const quoted = ref.quote.split("\n");
+      if (!ref.quote.trim()) return undefined;
+      let match = -1;
+      for (let i = 0; i <= lines.length - quoted.length; i++) {
+        if (!quoted.every((line, offset) => line === lines[i + offset])) continue;
+        if (match !== -1) return undefined;
+        match = i;
+      }
+      if (match === -1) return undefined;
+      ranges.push({ startLine: match + 1, endLine: match + quoted.length });
+    }
+  }
+  const merged: TextEditRange[] = [];
+  for (const range of ranges.sort((a,b) => a.startLine - b.startLine)) {
+    const previous = merged.at(-1);
+    if (previous && range.startLine <= previous.endLine) previous.endLine = Math.max(previous.endLine, range.endLine);
+    else merged.push(range);
+  }
+  if (merged.reduce((total, range) => total + range.endLine - range.startLine + 1, 0) >= lines.length) return undefined;
+  return merged;
+}
+
+function buildRevisionProtocol(mode: ReviseMode, language: "zh" | "en", boundRange: boolean): string {
+  if (boundRange) return language === "en"
+    ? "Revise only the host-bound editable ranges according to the activated professional Skill and governed context. Submit replacements through the required tool. Preserve all other text."
+    : "按已激活的专业 Skill 和权威上下文，仅修订宿主已绑定的范围。通过指定工具提交替换文本，保留范围外正文。";
   const modes: Record<ReviseMode, { readonly en: string; readonly zh: string }> = {
     polish: { en: "Edit wording only; keep facts, events, characters, and causality.", zh: "只改文字表面，保持事实、事件、人物和因果。" },
     rewrite: { en: "Rewrite the affected passages; rewrite the whole chapter only when the instruction spans it.", zh: "重写受影响段落；只有要求跨越整章时才重写整章。" },

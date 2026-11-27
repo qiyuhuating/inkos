@@ -677,6 +677,28 @@ node benchmarks/compose-replay.mjs ../inkos ../inkos-v2 benchmarks/chapter-001.m
 
 本轮复测：128 张角色卡、138 个上下文条目，交替六次/版本，v1 16.649 ms、v2 7.983 ms（中位数，下降 52.0%），固定筛选结果完全一致。与上表属于不同轮次，不横向混算。现有 spot-fix 使用范围替换；全局重写的明确请求仍允许全章修订。
 
+### 局部修订、文件缓存与长篇回放
+
+对于 spot-fix，若所有质量问题都有本章唯一完整的行级引文，宿主直接绑定替换范围，跳过范围选择请求。歧义、过期或非局部证据保留原路径；明确选区仍优先。固定 HTTP 响应测试验证两处修改只用一次替换请求，其他原文字节不变。
+
+Compose 文本和素材分段/元数据使用有界进程级文件缓存。每次命中校验 dev、ino、size、mtimeNs、ctimeNs；读前后身份不一致时不缓存。缓存预算按源文件字节计，不等同于实际堆内存。索引仍按内容哈希增量更新，不保持全局数据库连接。
+
+原子事务的预写阶段每批最多八个并发任务，全部完成后才进入准备日志与替换阶段；日志同步与恢复协议不变。
+
+| 本地实测（交替六轮/版本，中位数） | v1 | v2 |
+| --- | ---: | ---: |
+| 128 文件读取与 Markdown 分段（预热） | 2.802 ms | 0.978 ms |
+| 24 文件原子提交 | 46.244 ms | 44.284 ms |
+| 128 角色卡 Compose | 19.456 ms | 8.809 ms |
+
+另一次独立进程对照：60 章、32 张角色卡、固定选择与真实状态归约/当前状态原子写入。v1 2,835 ms、v2 2,047 ms；峰值 RSS 115.56/111.34 MiB。强制 GC 后第 60 章堆内存 16.70/16.78 MiB。此回放不含模型、历史完整快照写入和长会话 Agent 记录，不能证明完整连载不存在内存泄漏。单次进程测试仅为初步测量。
+
+```bash
+node benchmarks/local-io-replay.mjs ../inkos ../inkos-v2 benchmarks/chapter-001.md
+node --expose-gc benchmarks/longform-memory-replay.mjs ../inkos benchmarks/chapter-001.md
+node --expose-gc benchmarks/longform-memory-replay.mjs ../inkos-v2 benchmarks/chapter-001.md
+```
+
 ## Star History
 
 <a href="https://www.star-history.com/#Narcooo/inkos&type=date&legend=top-left">

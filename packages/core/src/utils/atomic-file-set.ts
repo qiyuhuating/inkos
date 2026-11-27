@@ -177,10 +177,15 @@ async function commitFileSet(input: AtomicFileSet): Promise<void> {
   let cleanup = true;
 
   try {
-    for (const entry of writes) {
-      const stagedPath = join(stagedDir, entry.relativePath);
-      await mkdir(dirname(stagedPath), { recursive: true });
-      await writeFile(stagedPath, entry.content);
+    for (let offset = 0; offset < writes.length; offset += 8) {
+      const staged = await Promise.allSettled(writes.slice(offset, offset + 8).map(async entry => {
+        const stagedPath = join(stagedDir, entry.relativePath);
+        await mkdir(dirname(stagedPath), { recursive: true });
+        await writeFile(stagedPath, entry.content);
+      }));
+      // A failed stage must not race cleanup or the prepared journal.
+      const failure = staged.find(result => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
     }
 
     await writeJournal(transactionDir, journal);
