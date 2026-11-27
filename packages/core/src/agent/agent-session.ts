@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { stat } from "node:fs/promises";
 import { Agent } from "@mariozechner/pi-agent-core";
 import { preserveToolArgumentTypes } from "./tool-arguments.js";
 import { ToolResultArchive } from "./tool-result-archive.js";
@@ -24,15 +23,14 @@ import { buildHarnessSystemPrompt } from "../harness/system-prompt.js";
 import { confirmedCapabilityBinding, buildProductionCapabilityRegistry } from "../harness/production-registry.js";
 import { createBuiltInWorkProfileRegistry } from "../harness/builtin-profiles.js";
 import { createCapabilityPiTools, capabilityActionId, capabilityToolName, renderActionResultForAgent } from "../harness/pi-tools.js";
-import { createHarnessContextTransform } from "../harness/agent-context.js";
+import { createHarnessContextTransform, type HarnessContextWindow } from "../harness/agent-context.js";
 import { ConversationCheckpointStore } from "../harness/conversation-checkpoint.js";
 import { resolveSessionHarnessBinding } from "../harness/session-binding.js";
 import { loadWorkManifest } from "../harness/work-store.js";
 import type { WorkManifest, WorkProfile, ActionResult } from "../harness/contracts.js";
 import {
   appendTranscriptSequenceEvents,
-  readTranscriptSequence,
-  transcriptPath,
+  readTranscriptRevision,
 } from "../interaction/session-transcript.js";
 import {
   adaptRestoredAgentMessagesForModel,
@@ -109,6 +107,8 @@ export interface AgentSessionConfig {
   apiKey?: string;
   /** Use SSE when true; adapt a complete response into Pi events when false. */
   stream?: boolean;
+  /** Return only the retained window instead of materializing the full disk history. */
+  historyScope?: "full" | "window";
   /** Optional HTTP proxy shared with the project LLM client. */
   proxyUrl?: string;
   /** Cancellation of a containing workflow also stops its continuation turn. */
@@ -158,8 +158,10 @@ export interface AgentSessionResult {
   workTransition?: AgentWorkTransition;
   /** Extracted text from the final assistant message. */
   responseText: string;
-  /** Full raw Agent conversation history. */
+  /** Full history by default; bounded recent messages when historyScope is window. */
   messages: AgentMessage[];
+  /** Number of normalized historical messages represented by the omitted checkpoint. */
+  compactedHistoryCount?: number;
   /** Upstream model error surfaced by pi-agent-core, if the final assistant turn failed. */
   errorMessage?: string;
   /** Profile that governed this turn. */
@@ -194,6 +196,7 @@ interface CachedAgent {
   pendingWorkTransition?: AgentWorkTransition;
   completedPlayScene?: string;
   agent: Agent;
+  historyWindow: HarnessContextWindow;
   sessionId: string;
   projectRoot: string;
   bookId: string | null;
@@ -218,6 +221,7 @@ interface CachedAgent {
   suppressProductionTools: boolean;
   currentAttachmentPaths: string[];
   lastCommittedSeq: number;
+  transcriptFingerprint?: string;
   historyBytes: number;
   lastActive: number;
 }
@@ -448,14 +452,13 @@ async function runInAgentSessionQueue<T>(
   try {
     return await task();
   } finally {
-    // The on-disk transcript is a conservative size proxy for idle history,
-    // including tool payloads. Do not truncate active model context.
+    // Account for the retained window, not the authoritative disk history.
     const entry = agentCache.get(key);
     if (entry) {
       try {
-        entry.historyBytes = (await stat(transcriptPath(projectRoot, sessionId))).size;
+        entry.historyBytes = Buffer.byteLength(JSON.stringify(entry.agent.state.messages));
       } catch {
-        entry.historyBytes = Infinity; // don't retain an unaccounted session
+        entry.historyBytes = Infinity;
       }
       entry.lastActive = Date.now();
     }
@@ -467,9 +470,6 @@ async function runInAgentSessionQueue<T>(
   }
 }
 
-async function latestCommittedSeq(projectRoot: string, sessionId: string): Promise<number> {
-  return (await readTranscriptSequence(projectRoot, sessionId)).lastCommittedSeq;
-}
 
 function transcriptRoleForMessage(message: AgentMessage): TranscriptRole | null {
   if (!message || typeof message !== "object" || !("role" in message)) return null;
@@ -779,9 +779,8 @@ function isAbortLike(error: unknown): boolean {
 /**
  * Run a single conversation turn within a cached Agent session.
  *
- * If the session already exists in the cache, reuses the Agent (with its full
- * in-memory message history including tool calls). Otherwise creates a new
- * Agent from the canonical session transcript.
+ * Cached Agents retain a validated summary prefix and recent messages.
+ * The full committed conversation remains available from the transcript.
  */
 export async function runAgentSession(
   config: AgentSessionConfig,
@@ -899,10 +898,10 @@ async function runAgentSessionUnlocked(
 
   // ----- Resolve or create Agent -----
   let cached = agentCache.get(cacheKey);
-  let currentCommittedSeq: number | undefined;
+  const currentRevision = await readTranscriptRevision(projectRoot, sessionId);
 
   if (cached) {
-    currentCommittedSeq = await latestCommittedSeq(projectRoot, sessionId);
+
     // Evict and rebuild if model protocol identity OR bookId changed. Both are
     // captured into the Agent at construction time (model via initialState,
     // bookId via closures in systemPrompt / tools / transformContext), so a
@@ -923,7 +922,7 @@ async function runAgentSessionUnlocked(
     const playWorldChanged = cached.playWorldExists !== playWorldExists;
     const backgroundTaskContextChanged = cached.backgroundTaskContext !== config.backgroundTaskContext;
     const suppressProductionToolsChanged = cached.suppressProductionTools !== suppressProductionTools;
-    const transcriptChanged = cached.lastCommittedSeq !== currentCommittedSeq;
+    const transcriptChanged = cached.lastCommittedSeq !== currentRevision.lastCommittedSeq || cached.transcriptFingerprint !== currentRevision.fingerprint;
 
     if (
       modelChanged ||
@@ -951,7 +950,6 @@ async function runAgentSessionUnlocked(
 
   if (!cached) {
     const restoredHistory = await restoreAgentMessagesFromTranscript(projectRoot, sessionId, sessionKind);
-    const initialAgentMessages = adaptRestoredAgentMessagesForModel(restoredHistory, model);
     const turnSkills = new Map<string, ActivatedSkillGuidance>(
       effectiveSkillResolution.usedSkills.map((skill) => [skill.id, { skill, resources: [] }]),
     );
@@ -1114,21 +1112,19 @@ async function runAgentSessionUnlocked(
           validateDelivery: () => cached!.artifactDeliveries.validate(projectRoot),
         })];
     const budgetTokens = agentContextBudget(model, systemPrompt, tools);
-    const agent = new Agent({
-      beforeToolCall: preserveToolArgumentTypes,
-      initialState: { model, systemPrompt, tools, messages: initialAgentMessages,
-      },
-      transformContext: createHarnessContextTransform({
+    const canReadArchives = tools.some(tool => tool.name === 'read_archived_tool_result');
+    const initialAgentMessages = adaptRestoredAgentMessagesForModel(restoredHistory, model, canReadArchives);
+    const historyWindow = createHarnessContextTransform({
         projectRoot,
         work,
         profile,
         budgetTokens,
         immutableCompletedMessages: true,
-        projectCompletedHistory: (messages) => adaptRestoredAgentMessagesForModel(messages, model),
+        projectCompletedHistory: (messages) => adaptRestoredAgentMessagesForModel(messages, model, canReadArchives),
         checkpoint: new ConversationCheckpointStore(projectRoot, sessionId, createHash("sha256").update(JSON.stringify({
           model: model.id, provider: model.provider, api: model.api, baseUrl: model.baseUrl,
-          profile: profileId, work: workId, language, budget: budgetTokens,
-          promptVersion: 2,
+          profile: profileId, work: workId, sessionKind, language, budget: budgetTokens,
+          promptVersion: 4,
         })).digest("hex")),
         semanticCompiler: async (request) => ({
           content: await compileHarnessContextText({
@@ -1156,7 +1152,11 @@ async function runAgentSessionUnlocked(
           signal: request.signal,
         }),
         onContextCompression,
-      }),
+    });
+    const agent = new Agent({
+      beforeToolCall: preserveToolArgumentTypes,
+      initialState: { model, systemPrompt, tools, messages: await historyWindow.restoreWindow(initialAgentMessages) },
+      transformContext: historyWindow,
       convertToLlm: convertAgentMessagesForModel,
       streamFn: (streamModel, context, options) => {
         // Pi snapshots its tool table per run. Resume with the new Work's actual
@@ -1185,6 +1185,7 @@ async function runAgentSessionUnlocked(
       deliveryFailed: false,
       artifactDeliveries: new TurnArtifactDeliveries(),
       agent,
+      historyWindow,
       sessionId,
       projectRoot,
       bookId,
@@ -1210,7 +1211,8 @@ async function runAgentSessionUnlocked(
       currentAttachmentPaths: (config.attachments ?? [])
         .map((attachment) => attachment.storedPath?.trim())
         .filter((path): path is string => Boolean(path)),
-      lastCommittedSeq: currentCommittedSeq ?? await latestCommittedSeq(projectRoot, sessionId),
+      lastCommittedSeq: currentRevision.lastCommittedSeq,
+      transcriptFingerprint: currentRevision.fingerprint,
       historyBytes: 0,
       lastActive: Date.now(),
     };
@@ -1226,7 +1228,9 @@ async function runAgentSessionUnlocked(
   for (const skill of skillResolution.usedSkills) {
     cached.turnSkills.set(skill.id, { skill, resources: [] });
   }
-  const { agent } = cached;
+  const { agent, historyWindow } = cached;
+  const compactedHistoryCount = historyWindow.compactedCount();
+  const requestMessageStart = agent.state.messages.length;
   const attachmentBlock = buildAttachmentUserBlock(config.attachments, language);
   const promptMessage = attachmentBlock ? `${userMessage}${attachmentBlock}` : userMessage;
   const promptImages = attachmentImages(config.attachments);
@@ -1441,6 +1445,7 @@ async function runAgentSessionUnlocked(
         timestamp: Date.now(),
       }));
       cached.lastCommittedSeq = committed.seq;
+      cached.transcriptFingerprint = (await readTranscriptRevision(projectRoot, sessionId)).fingerprint;
       finishEpisode(completion?.status === "blocked" ? "failed" : "completed");
     }
   } catch (error) {
@@ -1471,9 +1476,17 @@ async function runAgentSessionUnlocked(
   errorMessage ??= assistantErrorMessage(finalAssistant);
   const responseText = errorMessage ? "" : cached.completedPlayScene ?? completion?.message ?? (finalAssistant ? extractTextFromAssistant(finalAssistant) : "");
 
+  // Only release committed history after all message events and the commit
+  // receipt have been written. The original transcript is never truncated.
+  if (!errorMessage) agent.state.messages = historyWindow.releaseCommittedHistory(allMessages);
+  const resultMessages = config.historyScope !== "window" && compactedHistoryCount > 0
+    ? [...await restoreAgentMessagesFromTranscript(projectRoot, sessionId, sessionKind),
+        ...(errorMessage ? allMessages.slice(requestMessageStart) : [])]
+    : (config.historyScope === "window" ? agent.state.messages : allMessages).slice();
   return {
     responseText,
-    messages: allMessages.slice(),
+    messages: resultMessages,
+    ...(config.historyScope === "window" && historyWindow.compactedCount() > 0 ? {compactedHistoryCount:historyWindow.compactedCount()} : {}),
     profileId: cached.profileId,
     workId: cached.workId,
     ...(completion ? { completion } : {}),

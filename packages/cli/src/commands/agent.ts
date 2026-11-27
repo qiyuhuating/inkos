@@ -51,6 +51,7 @@ export const agentCommand = new Command("agent")
 
       const result = await runAgentSession(
         {
+          historyScope: "window",
           sessionId,
           bookId,
           sessionKind,

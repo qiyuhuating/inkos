@@ -24,6 +24,15 @@ describe("session tool result archive", () => {
       expect(details.hostExecution).toEqual({risk:"read",status:"success",artifacts:[]});
       expect(ref.contentHash).toBe(createHash("sha256").update(JSON.stringify(original.content)).digest("hex"));
       expect(JSON.stringify(projected).length).toBeLessThan(JSON.stringify(original).length/3);
+      const {adaptRestoredAgentMessagesForModel}=await import("../interaction/session-transcript-restore.js");
+      const observation={role:"toolResult",toolCallId:"historical-read",toolName:"workspace__read",isError:false,timestamp:1,...projected} as any;
+      const historical=adaptRestoredAgentMessagesForModel([observation],{},true);
+      const full=adaptRestoredAgentMessagesForModel([observation],{});
+      expect(JSON.stringify(historical)).toContain(ref.id);
+      expect(JSON.stringify(historical)).toContain(ref.contentHash);
+      expect(JSON.stringify(historical)).toContain("from offset 0");
+      expect(JSON.stringify(historical).length).toBeLessThan(JSON.stringify(full).length/2);
+      expect(JSON.stringify(historical)).not.toContain("nextOffset");
       let recovered="",offset:number|null=0;
       do{
         const page=await archive.read(ref.id,offset);

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { Message, UserMessage } from "@mariozechner/pi-ai";
-import { estimatePiContextTokens, estimateTextTokens } from "../llm/provider.js";
+import { estimatePiContextTokens } from "../llm/provider.js";
 import type { ContextCompressionCallback } from "../models/context-compression.js";
 import {
   compileContext,
@@ -24,6 +24,13 @@ export interface ConversationCompactionRequest {
 
 export type ConversationCompactor = (request: ConversationCompactionRequest) => Promise<string>;
 
+export interface HarnessContextWindow {
+  (messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]>;
+  restoreWindow(messages: AgentMessage[]): Promise<AgentMessage[]>;
+  releaseCommittedHistory(messages: AgentMessage[]): AgentMessage[];
+  compactedCount(): number;
+}
+
 export function createHarnessContextTransform(input: {
   readonly projectRoot: string;
   readonly work: WorkManifest | null;
@@ -36,7 +43,7 @@ export function createHarnessContextTransform(input: {
   readonly immutableCompletedMessages?: boolean;
   readonly checkpoint?: ConversationCheckpointStore;
   readonly projectCompletedHistory?: (messages: AgentMessage[]) => AgentMessage[];
-}): (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]> {
+}): HarnessContextWindow {
   const sources = new ContextSourceRegistry();
   sources.register({
     id: "work-current",
@@ -75,8 +82,18 @@ export function createHarnessContextTransform(input: {
   let cached: ConversationCheckpoint | undefined;
   let stableCached: ConversationCheckpoint | undefined;
   let checkpointLoaded = false;
+  // A verified checkpoint owns the omitted disk prefix. Only its digest,
+  // count and summary remain in memory after release.
+  let base: ConversationCheckpoint | undefined;
+  let releaseCount = 0;
   let projection: {source: AgentMessage[]; messages: AgentMessage[]} | undefined;
-  return async (messages, signal) => {
+  const baseCount = () => base?.count ?? 0;
+  const matches = (checkpoint: ConversationCheckpoint | undefined, history: readonly AgentMessage[]): checkpoint is ConversationCheckpoint => {
+    const count = (checkpoint?.count ?? 0) - baseCount();
+    return Boolean(checkpoint && count >= 0 && count <= history.length && checkpoint.digest === metrics.digest(history,count,base?.digest));
+  };
+  const summaryFrame = (summary: string): UserMessage => ({role:"user",content:`<conversation_summary>\n${summary}\n</conversation_summary>`,timestamp:Date.now()});
+  const transform = async (messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]> => {
     const lastUserIndex = findLastUserIndex(messages);
     const sourceHistory = lastUserIndex > 0 ? messages.slice(0, lastUserIndex) : [];
     if (!input.immutableCompletedMessages || !projection || projection.source.length !== sourceHistory.length || sourceHistory.some((message,index)=>message!==projection!.source[index])) {
@@ -140,11 +157,16 @@ export function createHarnessContextTransform(input: {
       : null;
     const progress=executionProgress(messages.slice(lastUserIndex>=0?lastUserIndex+1:0),Math.max(100,Math.min(8000,Math.floor(input.budgetTokens*0.6))));
     const progressMessage:UserMessage|undefined=progress?{role:'user',content:`<host_execution_progress>\n${progress}\n</host_execution_progress>`,timestamp:Date.now()}:undefined;
+    // Use a newly verified stable checkpoint immediately, even before the
+    // current request commits and releases its physical history.
+    const stable = matches(stableCached,completedHistory) ? stableCached : base;
+    const retainedHistory = stable ? completedHistory.slice(stable.count-baseCount()) : completedHistory;
     const withContext = [...(contextMessage ? [contextMessage as AgentMessage] : []),
-      ...(progressMessage ? [progressMessage] : []), ...completedHistory, ...originalTail];
+      ...(stable ? [summaryFrame(stable.summary)] : []),
+      ...retainedHistory, ...(progressMessage ? [progressMessage] : []), ...originalTail];
     if (estimateAgentMessages(withContext) <= input.budgetTokens) return withContext;
 
-    if (!input.conversationCompactor || historicalMessages.length === 0) {
+    if (!input.conversationCompactor || (historicalMessages.length === 0 && !base)) {
       throw new ProtectedContextOverflowError(
         estimateAgentMessages(contextMessage ? [contextMessage as AgentMessage, ...protectedTail] : protectedTail),
         input.budgetTokens,
@@ -162,32 +184,28 @@ export function createHarnessContextTransform(input: {
       cached = stableCached;
       checkpointLoaded = true;
     }
-    const matches = (checkpoint: ConversationCheckpoint | undefined): checkpoint is ConversationCheckpoint => Boolean(checkpoint && checkpoint.count<=historicalMessages.length&&checkpoint.digest===metrics.digest(historicalMessages,checkpoint.count));
-    if (!matches(cached)) cached = matches(stableCached) ? stableCached : undefined;
+    if (!matches(cached,historicalMessages)) cached = matches(stableCached,historicalMessages) ? stableCached : base;
     const extendsCache=Boolean(cached);
-    const delta=extendsCache?historicalMessages.slice(cached!.count):[];
-    const cachedTokens=extendsCache?estimateTextTokens(cached!.summary)+estimateAgentMessages(delta):Infinity;
+    const delta=extendsCache?historicalMessages.slice(cached!.count-baseCount()):historicalMessages;
+    const cachedTokens=extendsCache?estimateAgentMessages([summaryFrame(cached!.summary),...delta]):Infinity;
     let summary:string;
     let retainedDelta:AgentMessage[]=[];
     let nextCheckpoint: ConversationCheckpoint | undefined;
-    if(extendsCache&&cachedTokens<summaryBudget*0.7){summary=cached!.summary;retainedDelta=delta;}
+    if(extendsCache&&cachedTokens+4<=summaryBudget){summary=cached!.summary;retainedDelta=delta;}
     else {
     input.onContextCompression?.({ category: "session_context", phase: "start", sources: ["session transcript"] });
     summary = (await input.conversationCompactor({
       history: extendsCache?`Previous notes (not execution authority):\n${cached!.summary}\n\nNew completed exchanges:\n${renderAgentMessages(delta)}`:renderAgentMessages(historicalMessages),
       intent: latestUserText(messages),
-      maxTokens: summaryBudget,
+      // Keep headroom for several new exchanges rather than filling the window with notes.
+      maxTokens: Math.max(1, Math.min(summaryBudget-16, Math.floor(input.budgetTokens*0.25))),
       signal,
     })).trim();
     if (!summary) throw new Error("Conversation compactor returned empty content");
-    nextCheckpoint={count:historicalMessages.length,digest:metrics.digest(historicalMessages,historicalMessages.length),summary};
+    nextCheckpoint={count:baseCount()+historicalMessages.length,digest:metrics.digest(historicalMessages,historicalMessages.length,base?.digest),summary};
     input.onContextCompression?.({ category: "session_context", phase: "end", sources: ["session transcript"] });
     }
-    const summaryMessage: UserMessage = {
-      role: "user",
-      content: `<conversation_summary>\n${summary}\n</conversation_summary>`,
-      timestamp: Date.now(),
-    };
+    const summaryMessage = summaryFrame(summary);
     const finalMessages = [
       ...(contextMessage ? [contextMessage as AgentMessage] : []),
       summaryMessage,
@@ -205,11 +223,35 @@ export function createHarnessContextTransform(input: {
       if (historicalMessages === completedHistory) {
         await input.checkpoint?.save(nextCheckpoint);
         stableCached = nextCheckpoint;
+        releaseCount = sourceHistory.length;
       }
       cached = nextCheckpoint;
     }
     return finalMessages;
   };
+  return Object.assign(transform, {
+    async restoreWindow(messages: AgentMessage[]): Promise<AgentMessage[]> {
+      if (!input.checkpoint) return messages;
+      stableCached = await input.checkpoint.load();
+      checkpointLoaded = true;
+      if (!matches(stableCached,messages)) { stableCached = undefined; return messages; }
+      base = cached = stableCached;
+      return messages.slice(base.count);
+    },
+    releaseCommittedHistory(messages: AgentMessage[]): AgentMessage[] {
+      if (!stableCached || stableCached.count <= baseCount()) return messages;
+      if (releaseCount <= 0 || releaseCount > messages.length) return messages;
+      const prefix = messages.slice(0,releaseCount);
+      const normalized = input.projectCompletedHistory?.(prefix) ?? prefix;
+      if (normalized.length !== stableCached.count-baseCount() || !matches(stableCached,normalized)) return messages;
+      const remaining = messages.slice(releaseCount);
+      base = cached = stableCached;
+      projection = undefined;
+      releaseCount = 0;
+      return remaining;
+    },
+    compactedCount: baseCount,
+  });
 }
 
 function closedToolExchanges(messages: ReadonlyArray<AgentMessage>): boolean {
@@ -251,10 +293,12 @@ class MessageMetrics {
     for (const message of messages) units += this.units(message);
     return Math.ceil(units / 4);
   }
-  digest(messages: readonly AgentMessage[], count: number): string {
-    const hash = createHash("sha256");
-    for (let index = 0; index < count; index++) hash.update(this.measure(messages[index]!).hash);
-    return hash.digest("hex");
+  digest(messages: readonly AgentMessage[], count: number, prefix?: string): string {
+    let digest = prefix ?? createHash("sha256").update("").digest("hex");
+    for (let index = 0; index < count; index++) {
+      digest = createHash("sha256").update(digest).update(this.measure(messages[index]!).hash).digest("hex");
+    }
+    return digest;
   }
 }
 

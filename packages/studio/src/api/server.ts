@@ -5068,6 +5068,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
           exec.logs = [...(exec.logs ?? []), pick(surfaceLanguage, "继续完成确认请求中的剩余动作…", "Continuing the remaining confirmed request...")].slice(-80);
           await persistConfirmedTask(bookSession.sessionId, confirmedIntent, exec, sourceRequestId);
           const continuation = await runAgentSession({
+            historyScope: "window",
             onWorkTransition: publishExecutionTarget,
             signal: taskController.signal,
             model,
@@ -5234,6 +5235,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       const backgroundTask = await findActiveRunningTask(bookSession.sessionId);
       const result = await runAgentSession(
         {
+          historyScope: "window",
           signal: chatRequest?.controller.signal,
           baselineWork: chatRequest?.snapshot.baselineWork,
           onWorkTransition: publishExecutionTarget,

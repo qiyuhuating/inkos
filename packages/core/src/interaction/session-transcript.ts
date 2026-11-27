@@ -113,6 +113,11 @@ export async function readTranscriptSequence(projectRoot: string, sessionId: str
   return (await loadSequence(projectRoot, sessionId, false)).state;
 }
 
+export async function readTranscriptRevision(projectRoot: string, sessionId: string) {
+  const loaded = await loadSequence(projectRoot, sessionId, false);
+  return { lastCommittedSeq: loaded.state.lastCommittedSeq, fingerprint: loaded.identity?.fingerprint };
+}
+
 export async function nextTranscriptSeq(projectRoot: string, sessionId: string): Promise<number> {
   return (await readTranscriptSequence(projectRoot, sessionId)).nextSeq;
 }

@@ -12,7 +12,7 @@ const sessionId="active-session-replay";
 const bodyText="证据：完整正文与记录。".repeat(4000);
 const promptText="核验已有记录，保留证据与进度。".repeat(90);
 
-async function worker(root,baseUrl,start,count) {
+async function worker(root,baseUrl,start,count,historyScope="window") {
   const {runAgentSession,evictAgentCache}=await import("../packages/core/dist/agent/agent-session.js");
   const {readTranscriptEvents}=await import("../packages/core/dist/interaction/session-transcript.js");
   const model={id:"fixture-model",name:"fixture-model",api:"openai-completions",provider:"openai",
@@ -20,27 +20,38 @@ async function worker(root,baseUrl,start,count) {
   const samples=[],began=performance.now();
   for(let turn=start;turn<start+count;turn++){
     const result=await runAgentSession({projectRoot:root,sessionId,bookId:null,workId:null,
-      profileId:"workspace-default",sessionKind:"chat",language:"zh",model,apiKey:"fixture",stream:false,pipeline:{}},
+      profileId:"workspace-default",sessionKind:"chat",language:"zh",model,apiKey:"fixture",stream:false,...(historyScope==="window"?{historyScope}:{}),pipeline:{}},
       "Turn "+turn+": Read evidence.txt. "+promptText);
     assert.equal(result.responseText,"Fixture read completed.", JSON.stringify({turn,error:result.errorMessage,responseText:result.responseText,last:result.messages?.slice(-2).map(m=>({role:m.role,stopReason:m.stopReason,errorMessage:m.errorMessage,content:m.role==="assistant"?m.content:undefined}))}));
     if(turn===start||turn===start+count-1||turn%10===0){
       global.gc?.();
       const memory=process.memoryUsage();
-      samples.push({turn,heapMiB:memory.heapUsed/1048576,rssMiB:memory.rss/1048576});
+      samples.push({turn,heapMiB:memory.heapUsed/1048576,rssMiB:memory.rss/1048576,windowMessages:result.messages.length,compacted:result.compactedHistoryCount??0});
     }
   }
   const events=await readTranscriptEvents(root,sessionId);
   assert.equal(events.filter(event=>event.type==="request_committed").length,start+count-1);
+  const diskMessages=events.filter(event=>event.type==="message").length;
+  if(historyScope==="window"){
+    assert.ok(samples.at(-1).compacted>0, "No physical history released");
+    assert.ok(samples.at(-1).windowMessages<diskMessages, "Full disk history is still retained");
+  }else{
+    const {restoreAgentMessagesFromTranscript}=await import("../packages/core/dist/interaction/session-transcript-restore.js");
+    const restored=await restoreAgentMessagesFromTranscript(root,sessionId,"chat");
+    assert.equal(samples.at(-1).windowMessages,restored.length,"Full-history API diverged from canonical restore");
+    assert.equal(restored.filter(message=>message.role==="user").length,start+count-1);
+    assert.ok(JSON.stringify(restored[0]).includes("Turn 1:"));
+  }
   const checkpointFiles=await readdir(join(root,".inkos","conversation-checkpoints"));
   assert.equal(checkpointFiles.length,1);
   const archiveFiles=await readdir(join(root,".inkos","tool-results",(await import("node:crypto")).createHash("sha256").update(sessionId).digest("hex")));
-  const output={turns:count,commits:start+count-1,elapsedMs:performance.now()-began,peakRssMiB:process.resourceUsage().maxRSS/1024,samples,archiveFiles:archiveFiles.length};
+  const output={turns:count,commits:start+count-1,elapsedMs:performance.now()-began,peakRssMiB:process.resourceUsage().maxRSS/1024,samples,diskMessages,archiveFiles:archiveFiles.length};
   evictAgentCache(sessionId);
   console.log(JSON.stringify(output));
 }
 
 if(process.argv[2]==="worker"){
-  await worker(process.argv[3],process.argv[4],Number(process.argv[5]),Number(process.argv[6]));
+  await worker(process.argv[3],process.argv[4],Number(process.argv[5]),Number(process.argv[6]),process.argv[7]);
 }else{
   const root=await mkdtemp(join(tmpdir(),"inkos-active-session-"));
   let requests=[];
@@ -69,9 +80,9 @@ if(process.argv[2]==="worker"){
   });
   server.listen(0,"127.0.0.1");await once(server,"listening");
   const baseUrl="http://127.0.0.1:"+server.address().port+"/v1";
-  async function run(dir,start,count){
+  async function run(dir,start,count,scope="window"){
     requests=[];
-    const child=spawn(process.execPath,["--expose-gc",fileURLToPath(import.meta.url),"worker",dir,baseUrl,String(start),String(count)],{stdio:["ignore","pipe","pipe"]});
+    const child=spawn(process.execPath,["--expose-gc",fileURLToPath(import.meta.url),"worker",dir,baseUrl,String(start),String(count),scope],{stdio:["ignore","pipe","pipe"]});
     let stdout="",stderr="";
     child.stdout.on("data",b=>stdout+=b);
     child.stderr.on("data",b=>stderr+=b);
@@ -94,7 +105,8 @@ if(process.argv[2]==="worker"){
     assert.equal(active.commits,40);
     assert.equal(resumed.commits,cold.commits);
     assert.ok(resumed.compactionRequests<cold.compactionRequests, "Checkpoint did not reduce semantic compaction requests.");
-    console.log(JSON.stringify({active,resumed,cold},null,2));
+    const fullCompatibility=await run(seeded,42,1,"full");
+    console.log(JSON.stringify({active,resumed,cold,fullCompatibility},null,2));
   }finally{
     server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
     await rm(root,{recursive:true,force:true});

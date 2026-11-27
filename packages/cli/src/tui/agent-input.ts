@@ -117,6 +117,7 @@ export async function processTuiAgentInput(params: {
 
   const result = await runAgentSession(
     {
+      historyScope: "window",
       sessionId: params.session.sessionId,
       bookId: resolvedBookId,
       sessionKind: route.sessionKind,

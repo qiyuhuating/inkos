@@ -166,9 +166,24 @@ function isSameAssistantModel(message: Record<string, unknown>, target: TargetMo
   );
 }
 
+function historicalToolText(raw: Record<string, unknown>, text: string): string {
+  // Keep exact archive addresses, rather than sending the same large preview
+  // through every later summary. The original result remains on disk.
+  const details = raw.details;
+  if (raw.isError || !isObject(details) || !isObject(details.archivedResult)) return text;
+  const reference = details.archivedResult;
+  if (typeof reference.id !== "string" || !/^[a-f0-9]{64}$/.test(reference.id)) return text;
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { return text; }
+  if (!isObject(value) || !isObject(value.archivedResult) || value.archivedResult.id !== reference.id || typeof value.preview !== "string") return text;
+  return JSON.stringify({status:value.status,archivedResult:{id:reference.id,bytes:reference.bytes,contentHash:reference.contentHash},facts:value.facts,
+    excerpt:Array.from(value.preview).slice(0,512).join(''),note:"Historical excerpt only. Recover exact original evidence with read_archived_tool_result from offset 0; do not infer a complete read."});
+}
+
 export function adaptRestoredAgentMessagesForModel(
   messages: AgentMessage[],
   target: TargetModelIdentity,
+  compactArchivedResults = false,
 ): AgentMessage[] {
   const adapted: AgentMessage[] = [];
 
@@ -187,7 +202,7 @@ export function adaptRestoredAgentMessagesForModel(
         .filter(Boolean)
         .join("\n")
         .trim() || "(empty tool result)";
-      return [`- ${toolName} (${toolCallId}):`, text];
+      return [`- ${toolName} (${toolCallId}):`, compactArchivedResults ? historicalToolText(raw,text) : text];
     });
     const timestamp = toolResults.reduce((max, message) => {
       if (isObject(message) && typeof message.timestamp === "number") {

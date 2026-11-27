@@ -85,6 +85,7 @@ export function createInteractCommand(hooks: InteractCommandHooks = {}): Command
       }));
 
       const result = await runAgentSession({
+        historyScope: "window",
         sessionId,
         bookId,
         sessionKind,

@@ -46,6 +46,48 @@ describe("durable conversation checkpoint", () => {
     } finally {await rm(root,{recursive:true,force:true});}
   });
 
+  it("releases only a verified committed prefix, extends it incrementally, and restores the same window after restart", async () => {
+    const root=await mkdtemp(join(tmpdir(),"inkos-physical-history-"));
+    try {
+      const checkpoint=new ConversationCheckpointStore(root,"session","identity");
+      const histories:string[]=[];
+      const make=()=>createHarnessContextTransform({projectRoot:root,work:null,profile:createBuiltInWorkProfileRegistry().require("workspace-default"),budgetTokens:300,checkpoint,immutableCompletedMessages:true,
+        conversationCompactor:async({history})=>{histories.push(history);return "Remember the prior records.";}});
+      const transform=make();
+      const old={role:"user",content:"Old record. ".repeat(500),timestamp:1} as AgentMessage;
+      const current={role:"user",content:"Current request.",timestamp:2} as AgentMessage;
+      const answer={role:"assistant",content:[{type:"text",text:"Completed."}],timestamp:3} as AgentMessage;
+      await transform([old,current]);
+      const committed=[old,current,answer];
+      expect(transform.releaseCommittedHistory([{...old,content:"Changed history."} as AgentMessage,current,answer])).toHaveLength(3);
+      expect(transform.compactedCount()).toBe(0);
+      let window=transform.releaseCommittedHistory(committed);
+      expect(window).toEqual([current,answer]);
+      expect(transform.compactedCount()).toBe(1);
+      const next={role:"user",content:"Next request.",timestamp:4} as AgentMessage;
+      const small=await transform([...window,next]);
+      expect(JSON.stringify(small)).toContain("Remember the prior records.");
+      expect(JSON.stringify(small)).not.toContain("Old record.");
+      expect(histories).toHaveLength(1);
+      const large={role:"user",content:"New completed record. ".repeat(500),timestamp:5} as AgentMessage;
+      const last={role:"user",content:"Continue.",timestamp:6} as AgentMessage;
+      await transform([...window,next,large,last]);
+      expect(histories).toHaveLength(2);
+      expect(histories[1]).toContain("Previous notes");
+      expect(histories[1]).toContain("New completed record.");
+      expect(histories[1]).not.toContain("Old record.");
+      const full=[...committed,next,large,last];
+      window=transform.releaseCommittedHistory([...window,next,large,last]);
+      expect(window).toEqual([last]);
+      const restored=make();
+      expect(await restored.restoreWindow(JSON.parse(JSON.stringify(full)))).toEqual(window);
+      expect(restored.compactedCount()).toBe(full.length-1);
+      const edited=make();
+      expect(await edited.restoreWindow([{...old,content:"Different record."} as AgentMessage,...full.slice(1)])).toHaveLength(full.length);
+      expect(edited.compactedCount()).toBe(0);
+    }finally{await rm(root,{recursive:true,force:true});}
+  });
+
   it("does not overwrite a durable prefix with a summary of the active tool loop", async () => {
     const root=await mkdtemp(join(tmpdir(),"inkos-active-checkpoint-"));
     try {
