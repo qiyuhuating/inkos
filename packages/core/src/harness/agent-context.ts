@@ -19,6 +19,7 @@ import { compactArchivedObservation } from "../agent/archived-observation.js";
 export interface ConversationCompactionRequest {
   readonly history: string;
   readonly intent: string;
+  readonly scope?: "stable" | "active";
   readonly maxTokens: number;
   readonly signal?: AbortSignal;
 }
@@ -30,6 +31,8 @@ export interface HarnessContextWindow {
   restoreWindow(messages: AgentMessage[]): Promise<AgentMessage[]>;
   releaseCommittedHistory(messages: AgentMessage[]): AgentMessage[];
   compactedCount(): number;
+  beginRequest(): void;
+  captureCommittedTask(messages: AgentMessage[]): void;
   checkpoint(): ConversationCheckpoint | undefined;
   restoreVerifiedWindow(checkpoint: ConversationCheckpoint, messages: AgentMessage[]): AgentMessage[];
 }
@@ -95,8 +98,10 @@ export function createHarnessContextTransform(input: {
     return projected;
   };
   const estimateAgentMessages = (messages: readonly AgentMessage[]) => metrics.estimate(messages);
-  let cached: ConversationCheckpoint | undefined;
   let stableCached: ConversationCheckpoint | undefined;
+  // Active notes are scoped to one request, not the durable history chain.
+  let activeCached: (ConversationCheckpoint & { userDigest: string }) | undefined;
+  let committedTask: ConversationCheckpoint | undefined;
   let checkpointLoaded = false;
   // A verified checkpoint owns the omitted disk prefix. Only its digest,
   // count and summary remain in memory after release.
@@ -108,7 +113,7 @@ export function createHarnessContextTransform(input: {
     const count = (checkpoint?.count ?? 0) - baseCount();
     return Boolean(checkpoint && count >= 0 && count <= history.length && checkpoint.digest === metrics.digest(history,count,base?.digest));
   };
-  const summaryFrame = (summary: string): UserMessage => ({role:"user",content:`<conversation_summary>\n${summary}\n</conversation_summary>`,timestamp:Date.now()});
+  const summaryFrame = (summary: string): UserMessage => ({role:"user",content:`<conversation_summary>\n${escapeNoteMarkup(summary)}\n</conversation_summary>`,timestamp:Date.now()});
   const transform = async (messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]> => {
     const lastUserIndex = findLastUserIndex(messages);
     const sourceHistory = lastUserIndex > 0 ? messages.slice(0, lastUserIndex) : [];
@@ -116,7 +121,6 @@ export function createHarnessContextTransform(input: {
       projection = {source:sourceHistory,messages:input.projectCompletedHistory?.(sourceHistory) ?? sourceHistory};
     }
     const completedHistory = projection.messages;
-    let historicalMessages = completedHistory;
     const originalTail = lastUserIndex >= 0 ? messages.slice(lastUserIndex) : messages;
     // Pi owns several arrays of the same completed message objects during a
     // run. Release older archived read payloads through their shared object,
@@ -134,13 +138,21 @@ export function createHarnessContextTransform(input: {
       }
     }
     const referenceTail = input.compactActiveArchives ? originalTail.map(projectArchive) : originalTail;
-    let protectedTail = referenceTail;
+    const currentUser = lastUserIndex >= 0 ? referenceTail[0] : undefined;
+    const activeRecords = currentUser ? referenceTail.slice(1) : [];
+    const userDigest = currentUser ? createHash("sha256").update(renderAgentMessage(currentUser)).update(String(currentUser.timestamp)).digest("hex") : "";
+    if (activeCached && (activeCached.userDigest !== userDigest || activeCached.count > activeRecords.length
+      || metrics.digest(activeRecords,activeCached.count) !== activeCached.digest)) activeCached = undefined;
+    const activeCount = activeCached?.count ?? 0;
+    const activeFrame = (summary:string):UserMessage => ({role:"user",content:"<active_task_summary>\n"+escapeNoteMarkup(summary)+"\n</active_task_summary>",timestamp:Date.now()});
+    let boundary=activeCount+1;
+    let protectedTail = currentUser ? [currentUser,...referenceTail.slice(boundary)] : referenceTail;
     // Completed reads in the current tool loop can exceed a model window even
     // with a short user request. Preserve the request; compact the complete
     // closed tool exchanges, keeping their full evidence in the transcript.
     if (lastUserIndex >= 0 && estimateAgentMessages(protectedTail) > input.budgetTokens * 0.6
       && input.conversationCompactor && closedToolExchanges(protectedTail.slice(1))) {
-      let boundary=protectedTail.length;
+      let cut=protectedTail.length;
       let suffixUnits=0;
       const calls=new Set<string>(), results=new Set<string>();
       let unmatched=0;
@@ -155,11 +167,11 @@ export function createHarnessContextTransform(input: {
           for(const part of message.content)if(part.type==="toolCall"&&!calls.has(part.id)){
             calls.add(part.id);unmatched+=results.has(part.id)?-1:1;
           }
-          if(calls.size>0&&unmatched===0)boundary=i;
+          if(calls.size>0&&unmatched===0)cut=i;
         }
       }
-      historicalMessages = [...historicalMessages, ...protectedTail.slice(1,boundary)];
-      protectedTail = [messages[lastUserIndex]!,...protectedTail.slice(boundary)];
+      boundary=activeCount+cut;
+      protectedTail = [messages[lastUserIndex]!,...protectedTail.slice(cut)];
     }
     const tailTokens = estimateAgentMessages(protectedTail);
     const workBudget = input.budgetTokens - tailTokens;
@@ -189,82 +201,104 @@ export function createHarnessContextTransform(input: {
       : null;
     const progress=executionProgress(messages.slice(lastUserIndex>=0?lastUserIndex+1:0),Math.max(100,Math.min(8000,Math.floor(input.budgetTokens*0.6))));
     const progressMessage:UserMessage|undefined=progress?{role:'user',content:`<host_execution_progress>\n${progress}\n</host_execution_progress>`,timestamp:Date.now()}:undefined;
-    // Use a newly verified stable checkpoint immediately, even before the
-    // current request commits and releases its physical history.
-    const stable = matches(stableCached,completedHistory) ? stableCached : base;
-    const retainedHistory = stable ? completedHistory.slice(stable.count-baseCount()) : completedHistory;
-    const prefix = [...(contextMessage ? [contextMessage as AgentMessage] : []),
-      ...(stable ? [summaryFrame(stable.summary)] : []),
-      ...retainedHistory, ...(progressMessage ? [progressMessage] : [])];
-    const withContext = [...prefix,...originalTail];
-    if (estimateAgentMessages(withContext) <= input.budgetTokens) return withContext;
-    // Prefer addressable evidence over lossy semantic compression. The newest
-    // result keeps its full preview whenever it fits; otherwise the model can
-    // request the original bytes explicitly instead of spending a summary call.
-    const withReferences = [...prefix,...referenceTail];
-    if (estimateAgentMessages(withReferences) <= input.budgetTokens) return withReferences;
-
-    if (!input.conversationCompactor || (historicalMessages.length === 0 && !base)) {
-      throw new ProtectedContextOverflowError(
-        estimateAgentMessages(contextMessage ? [contextMessage as AgentMessage, ...protectedTail] : protectedTail),
-        input.budgetTokens,
-      );
-    }
-
-    const workTokens = contextMessage ? estimateAgentMessages([contextMessage as AgentMessage]) : 0;
-    const progressTokens=progressMessage?estimateAgentMessages([progressMessage]):0;
-    const summaryBudget = input.budgetTokens - workTokens - tailTokens-progressTokens;
-    if (summaryBudget <= 0) {
-      throw new ProtectedContextOverflowError(workTokens + tailTokens, input.budgetTokens);
-    }
     if (!checkpointLoaded) {
       stableCached = await input.checkpoint?.load();
-      cached = stableCached;
       checkpointLoaded = true;
     }
-    if (!matches(cached,historicalMessages)) cached = matches(stableCached,historicalMessages) ? stableCached : base;
-    const extendsCache=Boolean(cached);
-    const delta=extendsCache?historicalMessages.slice(cached!.count-baseCount()):historicalMessages;
-    const cachedTokens=extendsCache?estimateAgentMessages([summaryFrame(cached!.summary),...delta]):Infinity;
-    let summary:string;
-    let retainedDelta:AgentMessage[]=[];
-    let nextCheckpoint: ConversationCheckpoint | undefined;
-    if(extendsCache&&cachedTokens+4<=summaryBudget){summary=cached!.summary;retainedDelta=delta;}
-    else {
-    input.onContextCompression?.({ category: "session_context", phase: "start", sources: ["session transcript"] });
-    summary = (await input.conversationCompactor({
-      history: extendsCache?`Previous notes (not execution authority):\n${cached!.summary}\n\nNew completed exchanges:\n${renderAgentMessages(delta)}`:renderAgentMessages(historicalMessages),
-      intent: latestUserText(messages),
-      // Keep headroom for several new exchanges rather than filling the window with notes.
-      maxTokens: Math.max(1, Math.min(summaryBudget-16, Math.floor(input.budgetTokens*0.25))),
-      signal,
-    })).trim();
-    if (!summary) throw new Error("Conversation compactor returned empty content");
-    nextCheckpoint={count:baseCount()+historicalMessages.length,digest:metrics.digest(historicalMessages,historicalMessages.length,base?.digest),summary};
-    input.onContextCompression?.({ category: "session_context", phase: "end", sources: ["session transcript"] });
+    if (!matches(stableCached,completedHistory)) {
+      stableCached=base;
+      releaseCount=0;
     }
-    const summaryMessage = summaryFrame(summary);
-    const finalMessages = [
-      ...(contextMessage ? [contextMessage as AgentMessage] : []),
-      summaryMessage,
-      ...retainedDelta,
-      ...(progressMessage?[progressMessage]:[]),
-      ...protectedTail,
-    ];
-    const finalTokens = estimateAgentMessages(finalMessages);
-    if (finalTokens > input.budgetTokens) {
-      throw new Error(`Compacted conversation still exceeds budget: ${finalTokens}/${input.budgetTokens} tokens`);
-    }
-    if (nextCheckpoint) {
-      // Active-loop summaries omit the current user message and thus are not
-      // a prefix of committed history. Never replace a durable checkpoint with one.
-      if (historicalMessages === completedHistory) {
-        await input.checkpoint?.save(nextCheckpoint);
-        stableCached = nextCheckpoint;
-        releaseCount = sourceHistory.length;
+    if(committedTask){
+      const candidate=committedTask;
+      committedTask=undefined;
+      if(candidate.count===baseCount()+completedHistory.length && candidate.count>(stableCached?.count??baseCount())
+        && matches(candidate,completedHistory)){
+        await input.checkpoint?.save(candidate);
+        stableCached=candidate;
+        releaseCount=sourceHistory.length;
       }
-      cached = nextCheckpoint;
     }
+    const stable=stableCached;
+    const stableDelta=completedHistory.slice((stable?.count??baseCount())-baseCount());
+    const stableFrames:AgentMessage[]=[...(stable?[summaryFrame(stable.summary)]:[]),...stableDelta];
+    const activeNotes=activeCached?[activeFrame(activeCached.summary)]:[];
+    const prefix=[...(contextMessage?[contextMessage as AgentMessage]:[])];
+    const progressFrames=progressMessage?[progressMessage]:[];
+    const assemble=(history:AgentMessage[],notes:AgentMessage[],tail:AgentMessage[],delta:AgentMessage[]=[]) =>
+      [...prefix,...history,...notes,...progressFrames,...(delta.length?[tail[0]!,...delta,...tail.slice(1)]:tail)];
+    // Never expand records already covered by a verified task summary.
+    const fullTail=currentUser?[currentUser,...originalTail.slice(activeCount+1)]:originalTail;
+    const compactTail=currentUser?[currentUser,...referenceTail.slice(activeCount+1)]:referenceTail;
+    const withContext=assemble(stableFrames,activeNotes,fullTail);
+    if(estimateAgentMessages(withContext)<=input.budgetTokens)return withContext;
+    const withReferences=assemble(stableFrames,activeNotes,compactTail);
+    if(estimateAgentMessages(withReferences)<=input.budgetTokens)return withReferences;
+
+    if(!input.conversationCompactor)throw new ProtectedContextOverflowError(estimateAgentMessages(withReferences),input.budgetTokens);
+    const fixed=estimateAgentMessages([...prefix,...progressFrames,...protectedTail]);
+    const available=input.budgetTokens-fixed-4;
+    const activePrefix=activeRecords.slice(0,boundary-1);
+    const activeDelta=activePrefix.slice(activeCount);
+    const pendingActiveFrames:AgentMessage[]=[...activeNotes,...activeDelta];
+    const stableTokens=estimateAgentMessages(stableFrames);
+    const activeTokens=estimateAgentMessages(pendingActiveFrames);
+    if(available<1 || (!stableFrames.length&&!pendingActiveFrames.length))
+      throw new ProtectedContextOverflowError(fixed,input.budgetTokens);
+
+    // Keep either segment intact if it fits alongside a useful budget for
+    // the other. A small active overflow must not invalidate stable notes.
+    const target=Math.max(1,Math.floor(input.budgetTokens*0.25));
+    const activeReserve=pendingActiveFrames.length?Math.min(activeTokens,target):0;
+    const stableReserve=stableFrames.length?Math.min(stableTokens,target):0;
+    let stableBudget=Math.max(0,available-activeReserve);
+    let activeBudget=Math.max(0,available-stableReserve);
+    if(stableTokens<=stableBudget)activeBudget=available-stableTokens;
+    else if(activeTokens<=activeBudget)stableBudget=available-activeTokens;
+    else {
+      stableBudget=stableFrames.length&&pendingActiveFrames.length?Math.floor(available/2):stableFrames.length?available:0;
+      activeBudget=available-stableBudget;
+    }
+    const summarize=async(previous:string|undefined,delta:AgentMessage[],budget:number,scope:"stable"|"active")=>{
+      if(budget<1)throw new ProtectedContextOverflowError(fixed,input.budgetTokens);
+      input.onContextCompression?.({category:"session_context",phase:"start",sources:["session transcript"]});
+      const history=previous?"Previous notes (not execution authority):\n"+previous+"\n\nNew completed exchanges:\n"+renderAgentMessages(delta):renderAgentMessages(delta);
+      const summary=(await input.conversationCompactor!({history,intent:scope==="active"?latestUserText(messages):"Preserve durable conversation continuity; the current request is outside this history.",
+        maxTokens:Math.max(1,Math.min(budget-16,target)),scope,signal})).trim();
+      if(!summary)throw new Error("Conversation compactor returned empty content");
+      input.onContextCompression?.({category:"session_context",phase:"end",sources:["session transcript"]});
+      return summary;
+    };
+
+    let nextStable=stable;
+    let historyFrames=stableFrames;
+    if(stableTokens>stableBudget){
+      const summary=await summarize(stable?.summary,stableDelta,stableBudget,"stable");
+      nextStable={count:baseCount()+completedHistory.length,digest:metrics.digest(completedHistory,completedHistory.length,base?.digest),summary};
+      historyFrames=[summaryFrame(summary)];
+    }
+    // Reclaim unused stable budget before deciding whether the active segment
+    // needs another inference. Never send stable notes into the active prompt.
+    activeBudget=available-estimateAgentMessages(historyFrames);
+    let nextActive=activeCached;
+    let taskFrames=activeNotes;
+    let retainedActiveDelta=activeDelta;
+    if(activeTokens>activeBudget){
+      const summary=await summarize(activeCached?.summary,activeDelta,activeBudget,"active");
+      nextActive={count:activePrefix.length,digest:metrics.digest(activePrefix,activePrefix.length),summary,userDigest};
+      taskFrames=[activeFrame(summary)];
+      retainedActiveDelta=[];
+    }
+    const finalMessages=assemble(historyFrames,taskFrames,protectedTail,retainedActiveDelta);
+    const finalTokens=estimateAgentMessages(finalMessages);
+    if(finalTokens>input.budgetTokens)
+      throw new Error("Compacted conversation still exceeds budget: "+finalTokens+"/"+input.budgetTokens+" tokens");
+    if(nextStable!==stable&&nextStable){
+      await input.checkpoint?.save(nextStable);
+      stableCached=nextStable;
+      releaseCount=sourceHistory.length;
+    }
+    activeCached=nextActive;
     return finalMessages;
   };
   return Object.assign(transform, {
@@ -273,7 +307,7 @@ export function createHarnessContextTransform(input: {
       stableCached = await input.checkpoint.load();
       checkpointLoaded = true;
       if (!matches(stableCached,messages)) { stableCached = undefined; return messages; }
-      base = cached = stableCached;
+      base = stableCached;
       return messages.slice(base.count);
     },
     releaseCommittedHistory(messages: AgentMessage[]): AgentMessage[] {
@@ -283,15 +317,57 @@ export function createHarnessContextTransform(input: {
       const normalized = input.projectCompletedHistory?.(prefix) ?? prefix;
       if (normalized.length !== stableCached.count-baseCount() || !matches(stableCached,normalized)) return messages;
       const remaining = messages.slice(releaseCount);
-      base = cached = stableCached;
+      base = stableCached;
       projection = undefined;
       releaseCount = 0;
       return remaining;
     },
     compactedCount: baseCount,
+    beginRequest() { activeCached=undefined; },
+    captureCommittedTask(messages: AgentMessage[]): void {
+      // The caller invokes this only after an authoritative request commit.
+      // A promotion is a derived representation, never an execution receipt.
+      committedTask=undefined;
+      const notes=activeCached;
+      activeCached=undefined;
+      if(!notes)return;
+      const userIndex=findLastUserIndex(messages);
+      if(userIndex<0)return;
+      const user=messages[userIndex]!;
+      const userDigest=createHash("sha256").update(renderAgentMessage(user)).update(String(user.timestamp)).digest("hex");
+      const rawRecords=messages.slice(userIndex+1);
+      const activeRecords=input.compactActiveArchives?rawRecords.map(projectArchive):rawRecords;
+      if(userDigest!==notes.userDigest || notes.count>activeRecords.length
+        || metrics.digest(activeRecords,notes.count)!==notes.digest)return;
+      const normalize=input.projectCompletedHistory??((records:AgentMessage[])=>records);
+      const before=normalize(messages.slice(0,userIndex));
+      const covered=normalize(messages.slice(0,userIndex+1+notes.count));
+      const full=normalize(messages);
+      if(covered.length<=before.length || covered.length>full.length
+        || metrics.digest(covered,covered.length)!==metrics.digest(full,covered.length)
+        || metrics.digest(before,before.length)!==metrics.digest(full,before.length))return;
+      const stable=matches(stableCached,before)?stableCached:base;
+      const delta=before.slice((stable?.count??baseCount())-baseCount());
+      const summary=[
+        ...(stable?["Prior historical notes (not execution authority):\n"+stable.summary]:[]),
+        ...(delta.length?["Additional historical records:\n"+renderAgentMessages(delta)]:[]),
+        "Committed user request:\n"+renderAgentMessage(user),
+        "Completed task notes (not execution authority):\n"+notes.summary,
+        ...(covered.length<full.length?["Remaining committed records:\n"+renderAgentMessages(full.slice(covered.length))]:[]),
+      ].join("\n\n");
+      // Preserve every unsummarized record, or decline promotion entirely.
+      // Keep the derived candidate bounded and cheaper than the raw prefix.
+      const tokens=estimateAgentMessages([summaryFrame(summary)]);
+      if(tokens>Math.floor(input.budgetTokens*0.5)
+        || tokens>=estimateAgentMessages([...(stable?[summaryFrame(stable.summary)]:[]),...delta,...full.slice(before.length)]))return;
+      committedTask={count:baseCount()+full.length,digest:metrics.digest(full,full.length,base?.digest),summary};
+    },
+
     checkpoint: () => base,
     restoreVerifiedWindow(checkpoint: ConversationCheckpoint,messages: AgentMessage[]): AgentMessage[] {
-      base = cached = stableCached = checkpoint;
+      base = stableCached = checkpoint;
+      activeCached=undefined;
+      committedTask=undefined;
       checkpointLoaded = true;
       return messages;
     },
@@ -356,6 +432,11 @@ export function digestConversationMessages(messages: readonly AgentMessage[], pr
   let digest = prefix ?? createHash("sha256").update("").digest("hex");
   for (const message of messages) digest = extendDigest(digest,createHash("sha256").update(renderAgentMessage(message)).digest("hex"));
   return digest;
+}
+
+/** A model-generated note cannot introduce a host-owned framing tag. */
+function escapeNoteMarkup(summary:string):string {
+  return summary.replace(/<(?=\/?(?:host_execution_progress|conversation_summary|active_task_summary|current_work_context)(?:\s|\/?>))/gi,"&lt;");
 }
 
 function renderAgentMessage(message: AgentMessage): string {

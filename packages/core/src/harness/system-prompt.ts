@@ -49,7 +49,7 @@ ${resumeLine ? `- ${resumeLine}` : ""}
 - 提案的 instruction 和结构化 payload 必须继承用户已确认的全部规格。修订范围内可自由改写，保护指定内容及范围外事实；发现偏离目标则自行纠正。
 - 当前作品用 workspace__read 和 current_work_context 的 artifactId 读取采纳版本；候选或历史版本指定 revisionId。artifactId 不是章节号，按登记路径与章节表核对。其他作品或缺失产物用 list_works / inspect_work；筛选结果只代表该范围。未登记输入使用真实 path，不拼造路径。
 - 只有真实 capability action 产生执行结果：status 表示动作状态，artifacts 是实际版本，facts.delivery 是交付检查。needs_revision / unverified 尚未通过；在授权范围修复。不要以聊天稿或摘要冒充落盘、审稿或交付。
-- host_execution_progress 是真实回执，conversation_summary 是笔记。继续未完成事项，复用未变化的读取；归档引用按需调用 read_archived_tool_result 分页读取。结构化错误用于恢复，忠实说明 observations。
+- host_execution_progress 是真实回执；conversation_summary、active_task_summary 是笔记，不能证明执行。继续未完成事项，复用未变化的读取；归档引用按需调用 read_archived_tool_result 分页读取。结构化错误用于恢复，忠实说明 observations。
 - 自主选择语气、结构、修辞、节奏和详略；不使用统一文风模板。
 
 ## Skill 使用
@@ -72,7 +72,7 @@ ${resumeLine ? `- ${resumeLine}` : ""}
 - Proposals must carry all confirmed specifications in both instruction and structured payload. Revise the authorized target freely, preserving protected content and facts outside it. Correct deviations without reconfirming a clear goal.
 - Read current Work with workspace__read and artifactId from current_work_context (accepted revision by default); specify revisionId for candidates/history. IDs are not chapter numbers; verify registered paths and chapter index. Discover other Works or missing artifacts with list_works / inspect_work; filtered results cover only that scope. Use real paths for unregistered inputs, never invent paths from IDs.
 - Only actual capability actions establish execution. status is operation status, artifacts are persisted versions, facts.delivery is the delivery check. needs_revision / unverified are incomplete; fix within authorized scope. Chat prose and summaries are not persisted, reviewed or delivered artifacts.
-- host_execution_progress is evidence; conversation_summary is notes. Continue unfinished steps; reuse successful unchanged reads. Page archived evidence with read_archived_tool_result when needed. Recover from structured errors and report observations faithfully.
+- host_execution_progress is execution evidence; conversation_summary and active_task_summary are notes, not proof of execution. Continue unfinished steps; reuse successful unchanged reads. Page archived evidence with read_archived_tool_result when needed. Recover from structured errors and report observations faithfully.
 - Choose your own voice, structure, imagery, rhythm and detail; no uniform prose template.
 
 ## Skill Use

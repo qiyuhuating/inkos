@@ -166,6 +166,63 @@ describe("guardedPiNonStreaming", () => {
       }
     }finally{evictAgentCache(sessionId);await rm(root,{recursive:true,force:true});}
   });
+  it("carries successful active summaries into the next Agent request without mixing execution receipts", async () => {
+    const root=await mkdtemp(join(tmpdir(),"inkos-agent-summary-scopes-"));
+    const sessionId="summary-scopes-fixture";
+    const smallModel={...model,contextWindow:16000,maxTokens:1024};
+    const config={projectRoot:root,sessionId,bookId:null,workId:null,profileId:"workspace-default",
+      sessionKind:"chat" as const,language:"zh",model:smallModel,apiKey:"fixture",stream:false,historyScope:"window" as const,pipeline:{} as never};
+    let request=0,mainCalls=0;
+    const summaries:{request:number;scope:string;input:string}[]=[];
+    const response=(name:string,args:unknown,id:string)=>new Response(JSON.stringify({choices:[{
+      finish_reason:"tool_calls",message:{tool_calls:[{id,type:"function",function:{name,arguments:JSON.stringify(args)}}]},
+    }]}));
+    try{
+      await writeFile(join(root,"a.txt"),"来源甲原始证据。".repeat(950));
+      await writeFile(join(root,"b.txt"),"来源乙原始证据。".repeat(950));
+      fetchWithProxyMock.mockImplementation(async(_url:string,init:RequestInit)=>{
+        const body=JSON.parse(String(init.body));
+        if(body.tool_choice==="none"){
+          const scope=body.messages[0].content.includes("current request")?"active":"stable";
+          summaries.push({request,scope,input:JSON.stringify(body.messages)});
+          return new Response(JSON.stringify({choices:[{finish_reason:"stop",message:{content:"保留原始证据地址；读取结果以宿主回执为准。"}}]}));
+        }
+        mainCalls++;
+        const serialized=JSON.stringify(body.messages);
+        if(mainCalls===1){
+          if(request===2){
+            expect(serialized).toContain("Completed task notes (not execution authority)");
+            expect(serialized).not.toContain("<active_task_summary>");
+            expect(serialized).not.toContain("<host_execution_progress>");
+          }
+          return response("workspace__read",{path:"a.txt"},"a-"+request);
+        }
+        if(mainCalls===2)return response("workspace__read",{path:"b.txt"},"b-"+request);
+        if(mainCalls===3)return response("workspace__read",{path:"missing.txt"},"missing-"+request);
+        if(mainCalls===4){
+          const progress=body.messages.find((m:any)=>typeof m.content==="string"&&m.content.startsWith("<host_execution_progress>"));
+          expect(progress).toBeDefined();
+          const totals=JSON.parse(progress.content.split("\n")[1]).totals;
+          expect(totals.successful+totals.failed).toBe(3);
+          expect(totals.successful).toBe(2);
+          expect(totals.failed).toBe(1);
+          return response("finish_turn",{status:"answered",message:"两份材料已读取，缺失文件未读取。"},"finish-"+request);
+        }
+        throw Error("Unexpected main-model request");
+      });
+      for(request=1;request<=2;request++){
+        mainCalls=0;
+        const result=await runAgentSession(config,"核验材料与缺失文件，任务 "+request);
+        expect(result.errorMessage).toBeUndefined();
+        expect(result.responseText).toBe("两份材料已读取，缺失文件未读取。");
+        expect(mainCalls).toBe(4);
+      }
+      expect(summaries.some(item=>item.scope==="active")).toBe(true);
+      expect(summaries.some(item=>item.request===2&&item.scope==="stable")).toBe(false);
+      const events=await readTranscriptEvents(root,sessionId);
+      expect(events.filter(event=>event.type==="request_committed")).toHaveLength(2);
+    }finally{evictAgentCache(sessionId);await rm(root,{recursive:true,force:true});}
+  });
   it("evicts the oldest idle Agent and restores the committed conversation on demand", async () => {
     const root=await mkdtemp(join(tmpdir(),"inkos-idle-agents-"));
     const ids=Array.from({length:17},(_,index)=>"idle-fixture-"+index);

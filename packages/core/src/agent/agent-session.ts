@@ -1170,7 +1170,9 @@ async function runAgentSessionUnlocked(
           apiKey: config.apiKey,
           stream: config.stream !== false,
           proxyUrl: config.proxyUrl,
-          systemPrompt: "Summarize the supplied records, not the current task. Preserve user constraints, exact paths, revisions, archive IDs and offsets, actual successes/failures, and unfinished work. Distinguish requested actions from executed ones and partial reads from complete reads. Use only recorded evidence; the host receipts remain authoritative.",
+          systemPrompt: request.scope === "active"
+            ? "Summarize only the supplied completed exchanges of the current request. Preserve relevant evidence, exact paths, revisions, archive IDs and offsets, observed errors, and unfinished work. Do not infer completion; host receipts remain authoritative."
+            : "Summarize only the supplied committed historical records, not the current task. Preserve durable user constraints, exact paths, revisions, archive IDs and offsets, actual successes/failures, and unfinished work. Distinguish requested actions from executed ones and partial reads from complete reads. Use only recorded evidence; the host receipts remain authoritative.",
           contextPrefix: `Current intent:\n${request.intent}\n\nCompleted history:`,
           userPrompt: request.history,
           maxTokens: request.maxTokens,
@@ -1264,6 +1266,7 @@ async function runAgentSessionUnlocked(
     cached.turnSkills.set(skill.id, { skill, resources: [] });
   }
   const { agent, historyWindow } = cached;
+  historyWindow.beginRequest();
   const compactedHistoryCount = historyWindow.compactedCount();
   const requestMessageStart = agent.state.messages.length;
   const attachmentBlock = buildAttachmentUserBlock(config.attachments, language);
@@ -1525,6 +1528,7 @@ async function runAgentSessionUnlocked(
   // Only release committed history after all message events and the commit
   // receipt have been written. The original transcript is never truncated.
   if (!errorMessage) {
+    if (!config.resumeAction) historyWindow.captureCommittedTask(allMessages);
     agent.state.messages = historyWindow.releaseCommittedHistory(allMessages);
     const checkpoint=historyWindow.checkpoint();
     if (checkpoint && committedRevision && !cached.recoveryIndexDisabled) {
