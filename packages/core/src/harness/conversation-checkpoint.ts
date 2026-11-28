@@ -52,14 +52,15 @@ export class ConversationCheckpointStore {
       return {count,digest,summary};
     } finally { await file.close(); }
   }
-  async save(checkpoint: ConversationCheckpoint): Promise<void> {
+  async save(checkpoint: ConversationCheckpoint): Promise<boolean> {
     const bytes = JSON.stringify({version:1,identity:this.identity,...checkpoint});
-    if (Buffer.byteLength(bytes) > MAX_BYTES) return;
+    if (Buffer.byteLength(bytes) > MAX_BYTES) return false;
     await mkdir(dirname(this.path), {recursive:true});
     const tmp = this.path + "." + randomUUID() + ".tmp";
     try {
       await writeFile(tmp, bytes, {encoding:"utf8",flag:"wx"});
       await rename(tmp,this.path);
+      return true;
     } finally { await rm(tmp,{force:true}); }
   }
 }

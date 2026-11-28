@@ -1,31 +1,99 @@
-import type {AgentMessage} from '@mariozechner/pi-agent-core';
-import {createHash} from 'node:crypto';
-import {actionResultFacts} from './action-observation.js';
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import { createHash } from "node:crypto";
+import { actionResultFacts } from "./action-observation.js";
 
-/** Exact receipts from tool exchanges. These record actions, never infer task completion. */
-export function executionProgress(messages: readonly AgentMessage[], maxChars: number): string {
-  const calls=new Map<string,{name:string;arguments:Record<string,unknown>}>();
-  const entries:Array<{tool:string;status:'success'|'error';arguments:Record<string,unknown>;resultHash:string;facts?:Record<string,unknown>;execution?:{risk:string;status:string;artifacts:unknown[]}}>=[];
-  for(const message of messages){
-    if(message.role==='assistant')for(const part of message.content)if(part.type==='toolCall')calls.set(part.id,{name:part.name,arguments:part.arguments});
-    if(message.role!=='toolResult')continue;
-    const call=calls.get(message.toolCallId);if(!call)continue;
-    const args=Object.fromEntries(Object.entries(call.arguments).filter(([key,value])=>['path','bookId','workId','worldId','nodeId','chapterNumber','subdir','format','outputDir','artifactId','revisionId','startLine','lineCount'].includes(key)&&['string','number'].includes(typeof value)));
+const argumentKeys = new Set(["path","bookId","workId","worldId","nodeId","chapterNumber","subdir","format","outputDir","artifactId","revisionId","startLine","lineCount"]);
+type ReceiptCall = {name:string; arguments:Record<string,unknown>};
+type EncodedReceipt = {text?:string; length:number};
+
+/** Request-local, deterministic receipt projection. The transcript is the
+ * authoritative ledger; this accumulator retains only counts, call addresses,
+ * unique read paths and the bounded most recent receipt encodings. */
+export class ExecutionProgressLedger {
+  private readonly calls = new Map<string,ReceiptCall>();
+  private readonly paths = new Set<string>();
+  private readonly encodedPaths:string[]=[];
+  private pathChars=0;
+  private readonly recent:EncodedReceipt[]=[];
+  private successful=0;
+  private failed=0;
+  private verifiedActions=0;
+  private successfulMutations=0;
+
+  constructor(private readonly maxChars:number) {}
+
+  record(message:AgentMessage):void {
+    if(message.role==="assistant"){
+      for(const part of message.content){
+        if(part.type!=="toolCall")continue;
+        const args=Object.fromEntries(Object.entries(part.arguments).filter(([key,value])=>argumentKeys.has(key)&&["string","number"].includes(typeof value)));
+        this.calls.set(part.id,{name:part.name,arguments:args});
+      }
+    }
+    if(message.role!=="toolResult")return;
+    const call=this.calls.get(message.toolCallId);
+    if(!call)return;
     const details=message.details as {data?:Record<string,unknown>;hostExecution?:{risk:string;status:string;artifacts:unknown[]};archivedResult?:{contentHash:string};archivedPage?:{contentHash:string}}|undefined;
-    const data=(details?.data??details) as Record<string,unknown>|undefined;
-    const facts=actionResultFacts(data);
-    entries.push({tool:call.name,status:message.isError?'error':'success',arguments:args,resultHash:(details?.archivedResult?.contentHash ?? details?.archivedPage?.contentHash ?? createHash('sha256').update(JSON.stringify(message.content)).digest('hex')).slice(0,16),...(Object.keys(facts).length?{facts}:{}),...(details?.hostExecution?{execution:details.hostExecution}:{})});
+    const facts=actionResultFacts(details?.data??details);
+    const execution=details?.hostExecution;
+    const status=message.isError?"error":"success";
+    if(message.isError)this.failed++;else this.successful++;
+    if(execution){
+      this.verifiedActions++;
+      if(!message.isError&&execution.status==="success"&&execution.risk!=="read")this.successfulMutations++;
+    }
+    const path=call.arguments.path;
+    if(!message.isError&&call.name.split("__").at(-1)==="read"&&typeof path==="string"&&!this.paths.has(path)){
+      const encoded=JSON.stringify(path);
+      this.pathChars+=encoded.length+(this.encodedPaths.length?1:0);
+      this.paths.add(path);
+      this.encodedPaths.push(encoded);
+    }
+    const encoded=JSON.stringify({tool:call.name,status,arguments:call.arguments,
+      resultHash:(details?.archivedResult?.contentHash??details?.archivedPage?.contentHash??createHash("sha256").update(JSON.stringify(message.content)).digest("hex")).slice(0,16),
+      ...(Object.keys(facts).length?{facts}:{}),...(execution?{execution}:{})});
+    this.recent.push({length:encoded.length,...(encoded.length<=this.maxChars?{text:encoded}:{})});
+    if(this.recent.length>8)this.recent.shift();
   }
-  if(!entries.length)return '';
-  const readPaths=[...new Set(entries.filter(e=>e.status==='success'&&e.tool.split('__').at(-1)==='read').map(e=>e.arguments.path).filter((p):p is string=>typeof p==='string'))];
-  const executions=entries.filter(e=>e.execution);
-  const totals={successful:entries.filter(e=>e.status==='success').length,failed:entries.filter(e=>e.status==='error').length,uniqueReadPaths:readPaths.length,
-    ...(executions.length?{verifiedActions:executions.length,successfulMutations:executions.filter(e=>e.status==='success'&&e.execution!.status==='success'&&e.execution!.risk!=='read').length}: {})};
-  const recent=entries.slice(-8);let paths=readPaths;
-  let output=JSON.stringify({scope:'current_user_request',totals,readPaths:paths,recent,truncated:entries.length>recent.length});
-  while(output.length>maxChars&&(recent.length||paths.length)){
-    if(recent.length)recent.shift();else paths=paths.slice(1);
-    output=JSON.stringify({scope:'current_user_request',totals,readPaths:paths,recent,truncated:true});
+
+  render():string {
+    const count=this.successful+this.failed;
+    if(!count)return "";
+    const totals={successful:this.successful,failed:this.failed,uniqueReadPaths:this.paths.size,
+      ...(this.verifiedActions?{verifiedActions:this.verifiedActions,successfulMutations:this.successfulMutations}:{})};
+    const prefix='{"scope":"current_user_request","totals":'+JSON.stringify(totals)+',"readPaths":[';
+    const middle='],"recent":[';
+    const suffix=(truncated:boolean)=>'],"truncated":'+String(truncated)+'}';
+    let recent=this.recent.slice();
+    let truncated=count>recent.length;
+    const length=()=>prefix.length+this.pathChars+middle.length+
+      recent.reduce((sum,item)=>sum+item.length,Math.max(0,recent.length-1))+suffix(truncated).length;
+    while(recent.length&&(length()>this.maxChars||recent.some(item=>item.text===undefined))){
+      recent.shift();
+      truncated=true;
+    }
+    let paths=this.encodedPaths;
+    if(length()>this.maxChars&&paths.length){
+      // The old projection drops oldest paths only after all recent receipts.
+      // Seek the bounded suffix from the end, rather than repeatedly serializing
+      // or slicing the complete distinct-path history.
+      truncated=true;
+      const budget=this.maxChars-prefix.length-middle.length-suffix(true).length;
+      let start=paths.length,chars=0;
+      while(start>0){
+        const next=paths[start-1]!.length+(start<paths.length?1:0);
+        if(chars+next>budget)break;
+        chars+=next;start--;
+      }
+      paths=paths.slice(start);
+    }
+    return prefix+paths.join(",")+middle+recent.map(item=>item.text!).join(",")+suffix(truncated);
   }
-  return output;
+}
+
+/** Reference projection for callers without a trusted append event stream. */
+export function executionProgress(messages:readonly AgentMessage[],maxChars:number):string {
+  const ledger=new ExecutionProgressLedger(maxChars);
+  for(const message of messages)ledger.record(message);
+  return ledger.render();
 }

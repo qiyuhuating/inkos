@@ -13,7 +13,7 @@ import {
 import type { WorkManifest, WorkProfile } from "./contracts.js";
 import { loadWorkManifest } from "./work-store.js";
 import type { ConversationCheckpoint, ConversationCheckpointStore } from "./conversation-checkpoint.js";
-import {executionProgress} from './execution-progress.js';
+import { ExecutionProgressLedger, executionProgress } from './execution-progress.js';
 import { compactArchivedObservation } from "../agent/archived-observation.js";
 
 export interface ConversationCompactionRequest {
@@ -32,7 +32,10 @@ export interface HarnessContextWindow {
   releaseCommittedHistory(messages: AgentMessage[]): AgentMessage[];
   compactedCount(): number;
   beginRequest(): void;
-  captureCommittedTask(messages: AgentMessage[]): void;
+  captureCommittedTask(messages: AgentMessage[]): ConversationCheckpoint | undefined;
+  persistCommittedTask(candidate: ConversationCheckpoint): Promise<boolean>;
+  discardCommittedTask(): void;
+  recordExecutionMessage(message: AgentMessage): void;
   checkpoint(): ConversationCheckpoint | undefined;
   restoreVerifiedWindow(checkpoint: ConversationCheckpoint, messages: AgentMessage[]): AgentMessage[];
 }
@@ -48,6 +51,8 @@ export function createHarnessContextTransform(input: {
   /** Pi passes completed, immutable messages at the transport boundary. */
   readonly immutableCompletedMessages?: boolean;
   readonly checkpoint?: ConversationCheckpointStore;
+  /** Only enable when every completed message is supplied by the host event stream. */
+  readonly trackExecutionEvents?: boolean;
   readonly projectCompletedHistory?: (messages: AgentMessage[]) => AgentMessage[];
   /** True only when the model has the session-scoped archive recovery tool. */
   readonly compactActiveArchives?: boolean;
@@ -102,6 +107,9 @@ export function createHarnessContextTransform(input: {
   // Active notes are scoped to one request, not the durable history chain.
   let activeCached: (ConversationCheckpoint & { userDigest: string }) | undefined;
   let committedTask: ConversationCheckpoint | undefined;
+  let persistedTask: ConversationCheckpoint | undefined;
+  const progressBudget=Math.max(100,Math.min(8000,Math.floor(input.budgetTokens*0.6)));
+  let ledger=new ExecutionProgressLedger(progressBudget);
   let checkpointLoaded = false;
   // A verified checkpoint owns the omitted disk prefix. Only its digest,
   // count and summary remain in memory after release.
@@ -199,7 +207,7 @@ export function createHarnessContextTransform(input: {
           timestamp: Date.now(),
         }
       : null;
-    const progress=executionProgress(messages.slice(lastUserIndex>=0?lastUserIndex+1:0),Math.max(100,Math.min(8000,Math.floor(input.budgetTokens*0.6))));
+    const progress=input.trackExecutionEvents ? ledger.render() : executionProgress(messages.slice(lastUserIndex>=0?lastUserIndex+1:0),progressBudget);
     const progressMessage:UserMessage|undefined=progress?{role:'user',content:`<host_execution_progress>\n${progress}\n</host_execution_progress>`,timestamp:Date.now()}:undefined;
     if (!checkpointLoaded) {
       stableCached = await input.checkpoint?.load();
@@ -214,10 +222,11 @@ export function createHarnessContextTransform(input: {
       committedTask=undefined;
       if(candidate.count===baseCount()+completedHistory.length && candidate.count>(stableCached?.count??baseCount())
         && matches(candidate,completedHistory)){
-        await input.checkpoint?.save(candidate);
+        if(persistedTask!==candidate)await input.checkpoint?.save(candidate);
         stableCached=candidate;
         releaseCount=sourceHistory.length;
       }
+      persistedTask=undefined;
     }
     const stable=stableCached;
     const stableDelta=completedHistory.slice((stable?.count??baseCount())-baseCount());
@@ -323,11 +332,24 @@ export function createHarnessContextTransform(input: {
       return remaining;
     },
     compactedCount: baseCount,
-    beginRequest() { activeCached=undefined; },
-    captureCommittedTask(messages: AgentMessage[]): void {
+    beginRequest() { activeCached=undefined; ledger=new ExecutionProgressLedger(progressBudget); },
+    recordExecutionMessage(message: AgentMessage) {
+      if(!input.trackExecutionEvents)return;
+      if(message.role==='user')ledger=new ExecutionProgressLedger(progressBudget);
+      else ledger.record(message);
+    },
+    async persistCommittedTask(candidate:ConversationCheckpoint) {
+      if(candidate!==committedTask)throw new Error('Stale committed summary candidate.');
+      const saved=await input.checkpoint?.save(candidate);
+      if(saved)persistedTask=candidate;
+      return saved===true;
+    },
+    discardCommittedTask() { committedTask=undefined; persistedTask=undefined; },
+    captureCommittedTask(messages: AgentMessage[]): ConversationCheckpoint | undefined {
       // The caller invokes this only after an authoritative request commit.
       // A promotion is a derived representation, never an execution receipt.
       committedTask=undefined;
+      persistedTask=undefined;
       const notes=activeCached;
       activeCached=undefined;
       if(!notes)return;
@@ -361,6 +383,7 @@ export function createHarnessContextTransform(input: {
       if(tokens>Math.floor(input.budgetTokens*0.5)
         || tokens>=estimateAgentMessages([...(stable?[summaryFrame(stable.summary)]:[]),...delta,...full.slice(before.length)]))return;
       committedTask={count:baseCount()+full.length,digest:metrics.digest(full,full.length,base?.digest),summary};
+      return committedTask;
     },
 
     checkpoint: () => base,
@@ -368,6 +391,7 @@ export function createHarnessContextTransform(input: {
       base = stableCached = checkpoint;
       activeCached=undefined;
       committedTask=undefined;
+      persistedTask=undefined;
       checkpointLoaded = true;
       return messages;
     },

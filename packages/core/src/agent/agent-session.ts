@@ -1141,6 +1141,7 @@ async function runAgentSessionUnlocked(
         profile,
         budgetTokens,
         immutableCompletedMessages: true,
+        trackExecutionEvents: true,
         compactActiveArchives: canReadArchives,
         retireArchivedObservation: (message,replacement) => {
           if (config.historyScope !== "window" || !persistedObservations.has(message)
@@ -1338,6 +1339,8 @@ async function runAgentSessionUnlocked(
       sourceToolAssistantUuid: actionAssistantUuid,
       message: actionResult,
     }));
+    historyWindow.recordExecutionMessage(actionAssistant);
+    historyWindow.recordExecutionMessage(actionResult);
     parentUuid = actionResultUuid;
     lastAssistantUuid = actionAssistantUuid;
   }
@@ -1407,6 +1410,7 @@ async function runAgentSessionUnlocked(
       message: persistedMessage,
     }));
 
+    historyWindow.recordExecutionMessage(event.message);
     if (role === "toolResult") cached!.persistedObservations.add(event.message);
     if (role === "assistant") lastAssistantUuid = uuid;
     parentUuid = uuid;
@@ -1528,10 +1532,27 @@ async function runAgentSessionUnlocked(
   // Only release committed history after all message events and the commit
   // receipt have been written. The original transcript is never truncated.
   if (!errorMessage) {
-    if (!config.resumeAction) historyWindow.captureCommittedTask(allMessages);
+    const candidate=!config.resumeAction && committedRevision ? historyWindow.captureCommittedTask(allMessages) : undefined;
     agent.state.messages = historyWindow.releaseCommittedHistory(allMessages);
     const checkpoint=historyWindow.checkpoint();
-    if (checkpoint && committedRevision && !cached.recoveryIndexDisabled) {
+    // Certify the candidate against the authoritative committed log before
+    // publishing it. Keep the current response window unchanged; next request
+    // or restart can adopt the already-persisted summary without inference.
+    if(candidate && committedRevision){
+      try {
+        const certified=await advanceConversationIndex({root:projectRoot,sessionId,sessionKind,identity:cached.recoveryIdentity,
+          model,canReadArchives:cached.canReadArchives,revision:committedRevision,checkpoint:candidate},cached.recoveryIndex,currentRevision);
+        if(certified?.seq===cached.lastCommittedSeq && committedRevision.lastCommittedSeq===cached.lastCommittedSeq
+          && await historyWindow.persistCommittedTask(candidate)){
+          cached.recoveryIndex=certified;
+          cached.recoveryIndexDisabled=false;
+        }else historyWindow.discardCommittedTask();
+      } catch(error) {
+        historyWindow.discardCommittedTask();
+        process.emitWarning('Cannot persist committed task summary: '+String(error));
+      }
+    }
+    if (checkpoint && committedRevision && !cached.recoveryIndexDisabled && cached.recoveryIndex?.fingerprint!==committedRevision.fingerprint) {
       try {
         cached.recoveryIndex = await advanceConversationIndex({root:projectRoot,sessionId,sessionKind,identity:cached.recoveryIdentity,
           model,canReadArchives:cached.canReadArchives,revision:committedRevision,checkpoint},cached.recoveryIndex,currentRevision);

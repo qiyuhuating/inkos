@@ -166,13 +166,14 @@ describe("guardedPiNonStreaming", () => {
       }
     }finally{evictAgentCache(sessionId);await rm(root,{recursive:true,force:true});}
   });
-  it("carries successful active summaries into the next Agent request without mixing execution receipts", async () => {
+  it("carries committed active summaries across Agent eviction without mixing execution receipts", async () => {
     const root=await mkdtemp(join(tmpdir(),"inkos-agent-summary-scopes-"));
     const sessionId="summary-scopes-fixture";
     const smallModel={...model,contextWindow:16000,maxTokens:1024};
     const config={projectRoot:root,sessionId,bookId:null,workId:null,profileId:"workspace-default",
       sessionKind:"chat" as const,language:"zh",model:smallModel,apiKey:"fixture",stream:false,historyScope:"window" as const,pipeline:{} as never};
     let request=0,mainCalls=0;
+    const interrupted=new AbortController();
     const summaries:{request:number;scope:string;input:string}[]=[];
     const response=(name:string,args:unknown,id:string)=>new Response(JSON.stringify({choices:[{
       finish_reason:"tool_calls",message:{tool_calls:[{id,type:"function",function:{name,arguments:JSON.stringify(args)}}]},
@@ -206,6 +207,7 @@ describe("guardedPiNonStreaming", () => {
           expect(totals.successful+totals.failed).toBe(3);
           expect(totals.successful).toBe(2);
           expect(totals.failed).toBe(1);
+          if(request===3)interrupted.abort();
           return response("finish_turn",{status:"answered",message:"两份材料已读取，缺失文件未读取。"},"finish-"+request);
         }
         throw Error("Unexpected main-model request");
@@ -216,11 +218,36 @@ describe("guardedPiNonStreaming", () => {
         expect(result.errorMessage).toBeUndefined();
         expect(result.responseText).toBe("两份材料已读取，缺失文件未读取。");
         expect(mainCalls).toBe(4);
+        if(request===1){
+          const {readdir}=await import("node:fs/promises");
+          const dir=join(root,".inkos","conversation-checkpoints");
+          const files=await readdir(dir);
+          expect(files).toHaveLength(1);
+          const checkpoint=JSON.parse(await readFile(join(dir,files[0]!), "utf8"));
+          expect(checkpoint.summary).toContain("Completed task notes (not execution authority)");
+          const {transcriptIndexPath}=await import("../interaction/transcript-index.js");
+          const index=JSON.parse(await readFile(transcriptIndexPath(root,sessionId,"window"),"utf8"));
+          const events=await readTranscriptEvents(root,sessionId);
+          expect(index.seq).toBe(events.find(e=>e.type==="request_committed")?.seq);
+          expect(index.digest).toBe(checkpoint.digest);
+          expect(evictAgentCache(sessionId)).toBe(true);
+        }
       }
       expect(summaries.some(item=>item.scope==="active")).toBe(true);
       expect(summaries.some(item=>item.request===2&&item.scope==="stable")).toBe(false);
       const events=await readTranscriptEvents(root,sessionId);
       expect(events.filter(event=>event.type==="request_committed")).toHaveLength(2);
+      const {readdir}=await import('node:fs/promises');
+      const dir=join(root,'.inkos','conversation-checkpoints');
+      const path=join(dir,(await readdir(dir))[0]!);
+      const committed=await readFile(path,'utf8');
+      evictAgentCache(sessionId);
+      mainCalls=0;
+      await expect(runAgentSession({...config,signal:interrupted.signal},'Interrupt this request.')).rejects.toBeDefined();
+      const after=await readTranscriptEvents(root,sessionId);
+      expect(after.filter(event=>event.type==='request_committed')).toHaveLength(2);
+      expect(after.filter(event=>event.type==='request_failed')).toHaveLength(1);
+      expect(await readFile(path,'utf8')).toBe(committed);
     }finally{evictAgentCache(sessionId);await rm(root,{recursive:true,force:true});}
   });
   it("evicts the oldest idle Agent and restores the committed conversation on demand", async () => {
