@@ -108,8 +108,11 @@ export class ToolResultArchive {
       parameters: archiveReadParameters(),
       execute: async (_id, params, signal) => {
         signal?.throwIfAborted();
-        const page = await this.read(params.id, params.offset ?? 0);
-        return { content: [{ type: "text", text: JSON.stringify(page) }], details: { archivedResultId: params.id, nextOffset: page.nextOffset } };
+        const offset = params.offset ?? 0;
+        const page = await this.read(params.id, offset);
+        const content = [{ type: "text" as const, text: JSON.stringify(page) }];
+        return { content, details: { archivedResultId: params.id, nextOffset: page.nextOffset,
+          archivedPage: { id: params.id, offset, contentHash: sha256(JSON.stringify(content)) } } };
       },
     };
   }

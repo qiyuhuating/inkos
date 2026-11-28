@@ -14,6 +14,7 @@ import type { WorkManifest, WorkProfile } from "./contracts.js";
 import { loadWorkManifest } from "./work-store.js";
 import type { ConversationCheckpoint, ConversationCheckpointStore } from "./conversation-checkpoint.js";
 import {executionProgress} from './execution-progress.js';
+import { compactArchivedObservation } from "../agent/archived-observation.js";
 
 export interface ConversationCompactionRequest {
   readonly history: string;
@@ -45,6 +46,10 @@ export function createHarnessContextTransform(input: {
   readonly immutableCompletedMessages?: boolean;
   readonly checkpoint?: ConversationCheckpointStore;
   readonly projectCompletedHistory?: (messages: AgentMessage[]) => AgentMessage[];
+  /** True only when the model has the session-scoped archive recovery tool. */
+  readonly compactActiveArchives?: boolean;
+  /** Retire shared payloads only after the original observation is persisted. */
+  readonly retireArchivedObservation?: (message: AgentMessage,replacement: AgentMessage) => boolean;
 }): HarnessContextWindow {
   const sources = new ContextSourceRegistry();
   sources.register({
@@ -80,6 +85,15 @@ export function createHarnessContextTransform(input: {
   });
 
   const metrics = new MessageMetrics(input.immutableCompletedMessages === true);
+  const archiveProjections = new WeakMap<AgentMessage,AgentMessage>();
+  const projectArchive = (message:AgentMessage):AgentMessage => {
+    if(!input.immutableCompletedMessages)return compactArchivedObservation(message);
+    const previous=archiveProjections.get(message);
+    if(previous)return previous;
+    const projected=compactArchivedObservation(message);
+    archiveProjections.set(message,projected);
+    return projected;
+  };
   const estimateAgentMessages = (messages: readonly AgentMessage[]) => metrics.estimate(messages);
   let cached: ConversationCheckpoint | undefined;
   let stableCached: ConversationCheckpoint | undefined;
@@ -104,7 +118,23 @@ export function createHarnessContextTransform(input: {
     const completedHistory = projection.messages;
     let historicalMessages = completedHistory;
     const originalTail = lastUserIndex >= 0 ? messages.slice(lastUserIndex) : messages;
-    let protectedTail = originalTail;
+    // Pi owns several arrays of the same completed message objects during a
+    // run. Release older archived read payloads through their shared object,
+    // not by mutating/splicing any Pi-owned message array.
+    let latestAssistant=-1;
+    for(let i=originalTail.length-1;i>=0;i--)if(originalTail[i]?.role==="assistant"){latestAssistant=i;break;}
+    if(input.compactActiveArchives&&input.retireArchivedObservation&&latestAssistant>0){
+      for(let i=0;i<latestAssistant;i++){
+        const message=originalTail[i]!;
+        const replacement=projectArchive(message);
+        if(replacement!==message&&input.retireArchivedObservation(message,replacement)) {
+          metrics.invalidate(message);
+          archiveProjections.set(message,message);
+        }
+      }
+    }
+    const referenceTail = input.compactActiveArchives ? originalTail.map(projectArchive) : originalTail;
+    let protectedTail = referenceTail;
     // Completed reads in the current tool loop can exceed a model window even
     // with a short user request. Preserve the request; compact the complete
     // closed tool exchanges, keeping their full evidence in the transcript.
@@ -163,10 +193,16 @@ export function createHarnessContextTransform(input: {
     // current request commits and releases its physical history.
     const stable = matches(stableCached,completedHistory) ? stableCached : base;
     const retainedHistory = stable ? completedHistory.slice(stable.count-baseCount()) : completedHistory;
-    const withContext = [...(contextMessage ? [contextMessage as AgentMessage] : []),
+    const prefix = [...(contextMessage ? [contextMessage as AgentMessage] : []),
       ...(stable ? [summaryFrame(stable.summary)] : []),
-      ...retainedHistory, ...(progressMessage ? [progressMessage] : []), ...originalTail];
+      ...retainedHistory, ...(progressMessage ? [progressMessage] : [])];
+    const withContext = [...prefix,...originalTail];
     if (estimateAgentMessages(withContext) <= input.budgetTokens) return withContext;
+    // Prefer addressable evidence over lossy semantic compression. The newest
+    // result keeps its full preview whenever it fits; otherwise the model can
+    // request the original bytes explicitly instead of spending a summary call.
+    const withReferences = [...prefix,...referenceTail];
+    if (estimateAgentMessages(withReferences) <= input.budgetTokens) return withReferences;
 
     if (!input.conversationCompactor || (historicalMessages.length === 0 && !base)) {
       throw new ProtectedContextOverflowError(
@@ -295,6 +331,7 @@ class MessageMetrics {
     if (this.immutable) this.cache.set(message, value);
     return value;
   }
+  invalidate(message: AgentMessage): void { this.cache.delete(message); }
   units(message: AgentMessage): number { return this.measure(message).units; }
   estimate(messages: readonly AgentMessage[]): number {
     let units = Math.max(0, messages.length - 1);

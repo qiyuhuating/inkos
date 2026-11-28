@@ -203,6 +203,9 @@ interface CachedAgent {
   recoveryIndexDisabled?: boolean;
   recoveryIdentity: string;
   canReadArchives: boolean;
+  historyScope: "full" | "window";
+  fullHistoryFromDisk: boolean;
+  persistedObservations: WeakSet<AgentMessage>;
   sessionId: string;
   projectRoot: string;
   bookId: string | null;
@@ -928,6 +931,7 @@ async function runAgentSessionUnlocked(
     const playWorldChanged = cached.playWorldExists !== playWorldExists;
     const backgroundTaskContextChanged = cached.backgroundTaskContext !== config.backgroundTaskContext;
     const suppressProductionToolsChanged = cached.suppressProductionTools !== suppressProductionTools;
+    const historyScopeChanged = cached.historyScope !== (config.historyScope ?? "full");
     const transcriptChanged = cached.lastCommittedSeq !== currentRevision.lastCommittedSeq || cached.transcriptFingerprint !== currentRevision.fingerprint;
 
     if (
@@ -947,6 +951,7 @@ async function runAgentSessionUnlocked(
       playWorldChanged ||
       backgroundTaskContextChanged ||
       suppressProductionToolsChanged ||
+      historyScopeChanged ||
       transcriptChanged
     ) {
       removeCachedAgent(cacheKey);
@@ -1129,12 +1134,21 @@ async function runAgentSessionUnlocked(
     const savedCheckpoint=await checkpointStore.load();
     const restored= savedCheckpoint ? await restoreIndexedConversation({root:projectRoot,sessionId,sessionKind,identity:recoveryIdentity,
       model,canReadArchives,revision:currentRevision,checkpoint:savedCheckpoint}) : undefined;
+    const persistedObservations = new WeakSet<AgentMessage>();
     const historyWindow = createHarnessContextTransform({
         projectRoot,
         work,
         profile,
         budgetTokens,
         immutableCompletedMessages: true,
+        compactActiveArchives: canReadArchives,
+        retireArchivedObservation: (message,replacement) => {
+          if (config.historyScope !== "window" || !persistedObservations.has(message)
+            || message.role !== "toolResult" || replacement.role !== "toolResult") return false;
+          message.content = replacement.content;
+          message.details = replacement.details;
+          return true;
+        },
         projectCompletedHistory: (messages) => adaptRestoredAgentMessagesForModel(messages, model, canReadArchives),
         checkpoint: checkpointStore,
         semanticCompiler: async (request) => ({
@@ -1204,6 +1218,9 @@ async function runAgentSessionUnlocked(
       recoveryIndex: restored?.index,
       recoveryIdentity,
       canReadArchives,
+      historyScope: config.historyScope ?? "full",
+      fullHistoryFromDisk: currentRevision.lastCommittedSeq > 0,
+      persistedObservations,
       sessionId,
       projectRoot,
       bookId,
@@ -1387,6 +1404,7 @@ async function runAgentSessionUnlocked(
       message: persistedMessage,
     }));
 
+    if (role === "toolResult") cached!.persistedObservations.add(event.message);
     if (role === "assistant") lastAssistantUuid = uuid;
     parentUuid = uuid;
   };
@@ -1396,7 +1414,15 @@ async function runAgentSessionUnlocked(
     await persistAgentEvent(event);
     if ((event.type === "tool_execution_start" || event.type === "tool_execution_end" || event.type === "tool_execution_update")
       && event.toolName === TURN_COMPLETION_TOOL) return;
-    onEvent?.(event);
+    if (onEvent) {
+      // The window may release a persisted tool payload later. Do not mutate
+      // previously delivered message or turn-end event objects.
+      if ((event.type === "message_start" || event.type === "message_update" || event.type === "message_end") && event.message.role === "toolResult") {
+        onEvent({...event,message:{...event.message}});
+      } else if (event.type === "turn_end") {
+        onEvent({...event,toolResults:event.toolResults.map(message=>({...message}))});
+      } else onEvent(event);
+    }
   });
 
   // ----- Execute the turn -----
@@ -1517,7 +1543,7 @@ async function runAgentSessionUnlocked(
       }
     }
   }
-  const resultMessages = config.historyScope !== "window" && compactedHistoryCount > 0
+  const resultMessages = config.historyScope !== "window" && (compactedHistoryCount > 0 || cached.fullHistoryFromDisk)
     ? [...await restoreAgentMessagesFromTranscript(projectRoot, sessionId, sessionKind),
         ...(errorMessage ? allMessages.slice(requestMessageStart) : [])]
     : (config.historyScope === "window" ? agent.state.messages : allMessages).slice();

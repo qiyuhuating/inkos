@@ -167,6 +167,40 @@ describe("context assembly mini-flow", () => {
     expect(phases).toEqual(["start", "end"]);
   });
 
+  it("uses an addressable archive projection before paying for semantic compaction",async()=>{
+    const {compactArchivedObservation}=await import("../agent/archived-observation.js");
+    const {executionProgress}=await import("../harness/execution-progress.js");
+    const reference={id:"a".repeat(64),contentHash:"b".repeat(64),bytes:100000,nextOffset:8192};
+    const preview="Original evidence. ".repeat(500);
+    const observation={
+      role:"toolResult",toolCallId:"read",toolName:"workspace__read",isError:false,timestamp:3,
+      content:[{type:"text",text:JSON.stringify({status:"success",archivedResult:reference,preview,facts:{kind:"file_read"}})}],
+      details:{archivedResult:reference,displayText:preview,hostExecution:{risk:"read",status:"success",artifacts:[]}},
+    } as import("@mariozechner/pi-agent-core").AgentMessage;
+    const call={role:"assistant",timestamp:2,content:[{type:"toolCall",id:"read",name:"workspace__read",arguments:{path:"evidence.txt"}}]};
+    const messages=[{role:"user",content:"Prior evidence. ".repeat(50),timestamp:0},
+      {role:"user",content:"Read evidence.txt",timestamp:1},call,observation] as import("@mariozechner/pi-agent-core").AgentMessage[];
+    let calls=0;
+    const transform=createHarnessContextTransform({projectRoot:"/tmp",work:null,profile:createBuiltInWorkProfileRegistry().require("workspace-default"),
+      budgetTokens:1800,compactActiveArchives:true,conversationCompactor:async()=>{calls++;return "Notes";}});
+    const projected=await transform(messages);
+    expect(calls).toBe(0);
+    const shortened=projected.find(message=>message.role==="toolResult");
+    expect(shortened).not.toBe(observation);
+    expect(JSON.stringify(shortened)).toContain(reference.id);
+    expect(JSON.stringify(shortened)).not.toContain(preview);
+    expect(JSON.stringify(observation)).toContain(preview);
+    expect(executionProgress([call,observation] as never,8000)).toBe(executionProgress([call,shortened] as never,8000));
+    if(observation.role!=="toolResult")throw Error("Expected tool result");
+    const failure={...observation,isError:true};
+    expect(compactArchivedObservation(failure)).toBe(failure);
+    const mutation={...observation,details:{...observation.details,hostExecution:{risk:"write",status:"success",artifacts:[]}}};
+    expect(compactArchivedObservation(mutation)).toBe(mutation);
+    const noArchive=createHarnessContextTransform({projectRoot:"/tmp",work:null,profile:createBuiltInWorkProfileRegistry().require("workspace-default"),budgetTokens:1800,
+      conversationCompactor:async()=>{calls++;return "Notes";}});
+    await noArchive(messages);
+    expect(calls).toBe(1);
+  });
   it("compacts completed reads within the active turn while preserving the user's request", async () => {
     const profile = createBuiltInWorkProfileRegistry().require("workspace-default");
     const user = {role:"user",content:"Write the next three chapters.",timestamp:1};

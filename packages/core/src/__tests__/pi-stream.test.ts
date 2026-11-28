@@ -97,6 +97,75 @@ describe("guardedPiNonStreaming", () => {
       expect(JSON.parse(restored).content).toContain("END OF ORIGINAL");
     }finally{evictAgentCache(sessionId);await rm(root,{recursive:true,force:true});}
   });
+  it("retires only persisted older archive payloads in a live tool loop", async () => {
+    const root=await mkdtemp(join(tmpdir(),"inkos-live-archive-"));
+    const sessionId="live-archive";
+    const config={projectRoot:root,sessionId,bookId:null,workId:null,profileId:"workspace-default",
+      sessionKind:"chat" as const,language:"en",model,apiKey:"fixture",stream:false,pipeline:{} as never};
+    const delivered:import("@mariozechner/pi-agent-core").AgentMessage[]=[];
+    let calls=0,archiveId="",pageHash="";
+    const response=(name:string,args:unknown,id:string)=>new Response(JSON.stringify({choices:[{
+      finish_reason:"tool_calls",message:{tool_calls:[{id,type:"function",function:{name,arguments:JSON.stringify(args)}}]},
+    }]}));
+    try{
+      await writeFile(join(root,"evidence.txt"),"Evidence original content. ".repeat(4000)+"END");
+      fetchWithProxyMock.mockImplementation(async(_url:string,init:RequestInit)=>{
+        const body=JSON.parse(String(init.body));
+        calls++;
+        expect(body.tool_choice).not.toBe("none");
+        const tool=(id:string)=>JSON.parse(body.messages.find((item:any)=>item.role==="tool"&&item.tool_call_id===id).content);
+        if(calls===1)return response("workspace__read",{path:"evidence.txt"},"first-read");
+        if(calls===2){
+          const first=tool("first-read");
+          expect(first.preview.length).toBeGreaterThan(512);
+          archiveId=first.archivedResult.id;
+          return response("read_archived_tool_result",{id:archiveId,offset:0},"first-page");
+        }
+        if(calls===3){
+          expect(tool("first-read").preview).toBeUndefined();
+          expect(tool("first-read").archivedResult.id).toBe(archiveId);
+          expect(tool("first-page").text.length).toBeGreaterThan(512);
+          return response("workspace__read",{path:"evidence.txt"},"second-read");
+        }
+        if(calls===4){
+          const page=tool("first-page");
+          expect(page.archivedPage).toMatchObject({id:archiveId,offset:0});
+          expect(page.text).toBeUndefined();
+          expect(page.excerpt.length).toBeLessThanOrEqual(512);
+          pageHash=page.archivedPage.contentHash;
+          expect(tool("second-read").preview.length).toBeGreaterThan(512);
+          return finishResponse("answered","Completed reads.");
+        }
+        throw new Error("Unexpected main-model request");
+      });
+      const result=await runAgentSession({...config,historyScope:"window",onEvent:event=>{
+        if(event.type==="message_end"&&event.message.role==="toolResult")delivered.push(event.message);
+      }},"Read the evidence and its first page.");
+      expect(result.errorMessage).toBeUndefined();
+      expect(result.responseText).toBe("Completed reads.");
+      expect(calls).toBe(4);
+      const read=(messages:readonly import("@mariozechner/pi-agent-core").AgentMessage[],id:string)=>{
+        const message=messages.find(item=>item.role==="toolResult"&&item.toolCallId===id);
+        if(message?.role!=="toolResult"||message.content[0]?.type!=="text")throw Error("Missing observation "+id);
+        return JSON.parse(message.content[0].text);
+      };
+      expect(read(delivered,"first-read").preview.length).toBeGreaterThan(512);
+      expect(read(delivered,"first-page").text.length).toBeGreaterThan(512);
+      expect(read(result.messages,"first-read").preview).toBeUndefined();
+      expect(read(result.messages,"first-page").archivedPage.contentHash).toBe(pageHash);
+      const events=await readTranscriptEvents(root,sessionId);
+      const originals=events.filter(event=>event.type==="message").map(event=>event.message as import("@mariozechner/pi-agent-core").AgentMessage);
+      expect(read(originals,"first-read")).toEqual(read(delivered,"first-read"));
+      expect(read(originals,"first-page")).toEqual(read(delivered,"first-page"));
+      fetchWithProxyMock.mockImplementation(async()=>finishResponse("answered","Continued."));
+      for(let i=0;i<2;i++){
+        const full=await runAgentSession(config,"Continue.");
+        expect(full.responseText).toBe("Continued.");
+        expect(read(full.messages,"first-read")).toEqual(read(originals,"first-read"));
+        expect(read(full.messages,"first-page")).toEqual(read(originals,"first-page"));
+      }
+    }finally{evictAgentCache(sessionId);await rm(root,{recursive:true,force:true});}
+  });
   it("evicts the oldest idle Agent and restores the committed conversation on demand", async () => {
     const root=await mkdtemp(join(tmpdir(),"inkos-idle-agents-"));
     const ids=Array.from({length:17},(_,index)=>"idle-fixture-"+index);
