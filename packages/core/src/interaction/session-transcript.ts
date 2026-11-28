@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, stat } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { TranscriptEventSchema, type TranscriptEvent } from "./session-transcript-schema.js";
 import type { SessionKind, TranscriptRole } from "./session-transcript-schema.js";
+import { streamTranscriptEntries, transcriptFileIdentity } from "./transcript-reader.js";
+import { loadTranscriptIndex, saveTranscriptIndex, sequenceIndexSchema, transcriptIndexPath } from "./transcript-index.js";
 
 const SESSIONS_DIR = ".inkos/sessions";
 const appendQueues = new Map<string, Promise<void>>();
@@ -61,18 +63,10 @@ interface TranscriptSequence {
   readonly hasSessionCreated: boolean;
 }
 
-const sequenceCache = new Map<string, { fingerprint: string; state: TranscriptSequence }>();
+const sequenceCache = new Map<string, { fingerprint: string; state: TranscriptSequence; generation: string }>();
 const MAX_SEQUENCE_CACHE = 128;
 
-async function transcriptIdentity(path: string) {
-  try {
-    const info = await stat(path, { bigint: true });
-    return { file: [info.dev, info.ino].join(":"), size: info.size, fingerprint: [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].join(":") };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-}
+
 
 function advanceSequence(state: TranscriptSequence, events: readonly TranscriptEvent[]): TranscriptSequence {
   let { nextSeq, lastCommittedSeq, hasSessionCreated } = state;
@@ -84,38 +78,72 @@ function advanceSequence(state: TranscriptSequence, events: readonly TranscriptE
   return { nextSeq, lastCommittedSeq, hasSessionCreated };
 }
 
-function retainSequence(path: string, fingerprint: string, state: TranscriptSequence): void {
+function retainSequence(path: string, fingerprint: string, state: TranscriptSequence, generation: string): void {
   sequenceCache.delete(path);
-  sequenceCache.set(path, { fingerprint, state });
+  sequenceCache.set(path, { fingerprint, state, generation });
   if (sequenceCache.size > MAX_SEQUENCE_CACHE) sequenceCache.delete(sequenceCache.keys().next().value!);
 }
 
 async function loadSequence(projectRoot: string, sessionId: string, includeEvents: boolean) {
   const path = resolve(transcriptPath(projectRoot, sessionId));
-  const before = await transcriptIdentity(path);
+  const before = await transcriptFileIdentity(path);
   const cached = sequenceCache.get(path);
   if (!includeEvents && before && cached?.fingerprint === before.fingerprint) {
-    retainSequence(path, before.fingerprint, cached.state);
-    return { path, identity: before, state: cached.state, events: [] as TranscriptEvent[] };
+    retainSequence(path, before.fingerprint, cached.state, cached.generation);
+    return { path, identity: before, state: cached.state, generation: cached.generation, events: [] as TranscriptEvent[] };
   }
+  const generation = before && cached?.fingerprint === before.fingerprint ? cached.generation : randomUUID();
   sequenceCache.delete(path);
-  const events = await readTranscriptEvents(projectRoot, sessionId);
-  const state = advanceSequence({ nextSeq: 1, lastCommittedSeq: 0, hasSessionCreated: false }, events);
-  const after = await transcriptIdentity(path);
+  const events = includeEvents ? await readTranscriptEvents(projectRoot, sessionId) : [];
+  let state = advanceSequence({ nextSeq: 1, lastCommittedSeq: 0, hasSessionCreated: false }, events);
+  if (!includeEvents && before) {
+    const index = await loadTranscriptIndex(transcriptIndexPath(projectRoot,sessionId,"sequence"),sequenceIndexSchema);
+    if (index?.fingerprint === before.fingerprint) state = index.state;
+    else for await (const entry of streamTranscriptEntries(path,0,Number(before.size))) state = advanceSequence(state,[entry.event]);
+  }
+  const after = await transcriptFileIdentity(path);
   // Cache only a stable read. An external replacement must be revalidated.
   if (before?.fingerprint !== after?.fingerprint) throw new Error("Transcript changed during read; retry the operation.");
   const identity = after;
-  if (identity) retainSequence(path, identity.fingerprint, state);
-  return { path, identity, state, events };
+  if (identity) retainSequence(path, identity.fingerprint, state, generation);
+  return { path, identity, state, generation, events };
 }
 
 export async function readTranscriptSequence(projectRoot: string, sessionId: string): Promise<TranscriptSequence> {
   return (await loadSequence(projectRoot, sessionId, false)).state;
 }
 
-export async function readTranscriptRevision(projectRoot: string, sessionId: string) {
+export interface TranscriptRevision {
+  readonly lastCommittedSeq: number;
+  readonly fingerprint?: string;
+  readonly byteLength: number;
+  readonly generation: string;
+}
+
+export async function readTranscriptRevision(projectRoot: string, sessionId: string): Promise<TranscriptRevision> {
   const loaded = await loadSequence(projectRoot, sessionId, false);
-  return { lastCommittedSeq: loaded.state.lastCommittedSeq, fingerprint: loaded.identity?.fingerprint };
+  return { lastCommittedSeq: loaded.state.lastCommittedSeq, fingerprint: loaded.identity?.fingerprint,
+    byteLength:Number(loaded.identity?.size ?? 0n), generation:loaded.generation };
+}
+
+export interface TranscriptPageCursor { readonly fingerprint: string; readonly byteOffset: number }
+
+/** Seek directly to a validated byte boundary. A rewritten log invalidates its cursors. */
+export async function readTranscriptPage(projectRoot: string, sessionId: string, cursor?: TranscriptPageCursor, limit=128) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 512) throw new Error("Invalid transcript page size.");
+  const path = transcriptPath(projectRoot,sessionId);
+  const before = await transcriptFileIdentity(path);
+  if (cursor && cursor.fingerprint !== before?.fingerprint) throw new Error("Transcript page cursor is stale.");
+  if (!before) return {events:[] as TranscriptEvent[],nextCursor:null};
+  const events: TranscriptEvent[] = [];
+  let offset = cursor?.byteOffset ?? 0;
+  let nextCursor: TranscriptPageCursor | null = null;
+  for await (const entry of streamTranscriptEntries(path,offset,Number(before.size))) {
+    if (events.length === limit) { nextCursor={fingerprint:before.fingerprint,byteOffset:offset}; break; }
+    events.push(entry.event); offset=entry.end;
+  }
+  if ((await transcriptFileIdentity(path))?.fingerprint !== before.fingerprint) throw new Error("Transcript changed during page read.");
+  return {events,nextCursor};
 }
 
 export async function nextTranscriptSeq(projectRoot: string, sessionId: string): Promise<number> {
@@ -147,15 +175,19 @@ async function appendQueued(
     if (!result.length) return;
     const payload = result.map(event => JSON.stringify(event)).join("\n") + "\n";
     await mkdir(sessionsDir(projectRoot), { recursive: true });
-    const before = await transcriptIdentity(key);
+    const before = await transcriptFileIdentity(key);
     sequenceCache.delete(key);
     if (before?.fingerprint !== loaded.identity?.fingerprint) throw new Error("Transcript changed before append; retry the operation.");
     await appendFile(key, payload, "utf-8");
-    const after = await transcriptIdentity(key);
+    const after = await transcriptFileIdentity(key);
     if (after && before?.fingerprint === loaded.identity?.fingerprint
       && (!before || before.file === after.file)
       && after.size === (before?.size ?? 0n) + BigInt(Buffer.byteLength(payload))) {
-      retainSequence(key, after.fingerprint, advanceSequence(loaded.state, result));
+      const state = advanceSequence(loaded.state, result);
+      retainSequence(key, after.fingerprint, state, loaded.generation);
+      if (result.some(event=>event.type === "request_committed" || event.type === "request_failed" || event.type === "session_metadata_updated")) {
+        await saveTranscriptIndex(transcriptIndexPath(projectRoot,sessionId,"sequence"),{version:1,fingerprint:after.fingerprint,state});
+      }
     }
   });
   const settled = next.catch(() => undefined);

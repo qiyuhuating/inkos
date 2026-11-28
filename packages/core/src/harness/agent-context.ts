@@ -29,6 +29,8 @@ export interface HarnessContextWindow {
   restoreWindow(messages: AgentMessage[]): Promise<AgentMessage[]>;
   releaseCommittedHistory(messages: AgentMessage[]): AgentMessage[];
   compactedCount(): number;
+  checkpoint(): ConversationCheckpoint | undefined;
+  restoreVerifiedWindow(checkpoint: ConversationCheckpoint, messages: AgentMessage[]): AgentMessage[];
 }
 
 export function createHarnessContextTransform(input: {
@@ -251,6 +253,12 @@ export function createHarnessContextTransform(input: {
       return remaining;
     },
     compactedCount: baseCount,
+    checkpoint: () => base,
+    restoreVerifiedWindow(checkpoint: ConversationCheckpoint,messages: AgentMessage[]): AgentMessage[] {
+      base = cached = stableCached = checkpoint;
+      checkpointLoaded = true;
+      return messages;
+    },
   });
 }
 
@@ -296,10 +304,21 @@ class MessageMetrics {
   digest(messages: readonly AgentMessage[], count: number, prefix?: string): string {
     let digest = prefix ?? createHash("sha256").update("").digest("hex");
     for (let index = 0; index < count; index++) {
-      digest = createHash("sha256").update(digest).update(this.measure(messages[index]!).hash).digest("hex");
+      digest = extendDigest(digest,this.measure(messages[index]!).hash);
     }
     return digest;
   }
+}
+
+function extendDigest(prefix: string, frameHash: string): string {
+  return createHash("sha256").update(prefix).update(frameHash).digest("hex");
+}
+
+/** Same canonical chain used by in-memory and streamed prefix validation. */
+export function digestConversationMessages(messages: readonly AgentMessage[], prefix?: string): string {
+  let digest = prefix ?? createHash("sha256").update("").digest("hex");
+  for (const message of messages) digest = extendDigest(digest,createHash("sha256").update(renderAgentMessage(message)).digest("hex"));
+  return digest;
 }
 
 function renderAgentMessage(message: AgentMessage): string {

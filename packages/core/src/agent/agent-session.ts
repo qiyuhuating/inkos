@@ -31,12 +31,14 @@ import type { WorkManifest, WorkProfile, ActionResult } from "../harness/contrac
 import {
   appendTranscriptSequenceEvents,
   readTranscriptRevision,
+  type TranscriptRevision,
 } from "../interaction/session-transcript.js";
 import {
   adaptRestoredAgentMessagesForModel,
   restoreAgentMessagesFromTranscript,
 } from "../interaction/session-transcript-restore.js";
 import type { TranscriptEvent, TranscriptRole } from "../interaction/session-transcript-schema.js";
+import { advanceConversationIndex, restoreIndexedConversation, type RecoveryIndex } from "../interaction/transcript-recovery-index.js";
 import type { PlayMode, SessionKind } from "../interaction/session.js";
 import type { BookSession } from "../interaction/session.js";
 import { transitionSessionToWork } from "../interaction/book-session-store.js";
@@ -197,6 +199,10 @@ interface CachedAgent {
   completedPlayScene?: string;
   agent: Agent;
   historyWindow: HarnessContextWindow;
+  recoveryIndex?: RecoveryIndex;
+  recoveryIndexDisabled?: boolean;
+  recoveryIdentity: string;
+  canReadArchives: boolean;
   sessionId: string;
   projectRoot: string;
   bookId: string | null;
@@ -949,7 +955,7 @@ async function runAgentSessionUnlocked(
   }
 
   if (!cached) {
-    const restoredHistory = await restoreAgentMessagesFromTranscript(projectRoot, sessionId, sessionKind);
+
     const turnSkills = new Map<string, ActivatedSkillGuidance>(
       effectiveSkillResolution.usedSkills.map((skill) => [skill.id, { skill, resources: [] }]),
     );
@@ -1113,7 +1119,16 @@ async function runAgentSessionUnlocked(
         })];
     const budgetTokens = agentContextBudget(model, systemPrompt, tools);
     const canReadArchives = tools.some(tool => tool.name === 'read_archived_tool_result');
-    const initialAgentMessages = adaptRestoredAgentMessagesForModel(restoredHistory, model, canReadArchives);
+    const historyIdentity = createHash("sha256").update(JSON.stringify({
+      model: model.id, provider: model.provider, api: model.api, baseUrl: model.baseUrl,
+      profile: profileId, work: workId, sessionKind, language, budget: budgetTokens,
+      promptVersion: 4,
+    })).digest("hex");
+    const checkpointStore = new ConversationCheckpointStore(projectRoot,sessionId,historyIdentity);
+    const recoveryIdentity = createHash("sha256").update(JSON.stringify({historyIdentity,canReadArchives,compat:model.compat})).digest("hex");
+    const savedCheckpoint=await checkpointStore.load();
+    const restored= savedCheckpoint ? await restoreIndexedConversation({root:projectRoot,sessionId,sessionKind,identity:recoveryIdentity,
+      model,canReadArchives,revision:currentRevision,checkpoint:savedCheckpoint}) : undefined;
     const historyWindow = createHarnessContextTransform({
         projectRoot,
         work,
@@ -1121,11 +1136,7 @@ async function runAgentSessionUnlocked(
         budgetTokens,
         immutableCompletedMessages: true,
         projectCompletedHistory: (messages) => adaptRestoredAgentMessagesForModel(messages, model, canReadArchives),
-        checkpoint: new ConversationCheckpointStore(projectRoot, sessionId, createHash("sha256").update(JSON.stringify({
-          model: model.id, provider: model.provider, api: model.api, baseUrl: model.baseUrl,
-          profile: profileId, work: workId, sessionKind, language, budget: budgetTokens,
-          promptVersion: 4,
-        })).digest("hex")),
+        checkpoint: checkpointStore,
         semanticCompiler: async (request) => ({
           content: await compileHarnessContextText({
             model,
@@ -1153,9 +1164,13 @@ async function runAgentSessionUnlocked(
         }),
         onContextCompression,
     });
+    const initialAgentMessages = restored && savedCheckpoint
+      ? historyWindow.restoreVerifiedWindow(savedCheckpoint,restored.messages)
+      : await historyWindow.restoreWindow(adaptRestoredAgentMessagesForModel(
+          await restoreAgentMessagesFromTranscript(projectRoot,sessionId,sessionKind),model,canReadArchives));
     const agent = new Agent({
       beforeToolCall: preserveToolArgumentTypes,
-      initialState: { model, systemPrompt, tools, messages: await historyWindow.restoreWindow(initialAgentMessages) },
+      initialState: { model, systemPrompt, tools, messages: initialAgentMessages },
       transformContext: historyWindow,
       convertToLlm: convertAgentMessagesForModel,
       streamFn: (streamModel, context, options) => {
@@ -1186,6 +1201,9 @@ async function runAgentSessionUnlocked(
       artifactDeliveries: new TurnArtifactDeliveries(),
       agent,
       historyWindow,
+      recoveryIndex: restored?.index,
+      recoveryIdentity,
+      canReadArchives,
       sessionId,
       projectRoot,
       bookId,
@@ -1384,6 +1402,7 @@ async function runAgentSessionUnlocked(
   // ----- Execute the turn -----
   let finalAssistant: AssistantMessage | undefined;
   let errorMessage: string | undefined;
+  let committedRevision: TranscriptRevision | undefined;
   const turnMessageStartIndex = agent.state.messages.length;
   const abortContainingWorkflow = () => agent.abort();
   config.signal?.addEventListener("abort", abortContainingWorkflow, { once: true });
@@ -1445,7 +1464,8 @@ async function runAgentSessionUnlocked(
         timestamp: Date.now(),
       }));
       cached.lastCommittedSeq = committed.seq;
-      cached.transcriptFingerprint = (await readTranscriptRevision(projectRoot, sessionId)).fingerprint;
+      committedRevision = await readTranscriptRevision(projectRoot, sessionId);
+      cached.transcriptFingerprint = committedRevision.fingerprint;
       finishEpisode(completion?.status === "blocked" ? "failed" : "completed");
     }
   } catch (error) {
@@ -1478,7 +1498,25 @@ async function runAgentSessionUnlocked(
 
   // Only release committed history after all message events and the commit
   // receipt have been written. The original transcript is never truncated.
-  if (!errorMessage) agent.state.messages = historyWindow.releaseCommittedHistory(allMessages);
+  if (!errorMessage) {
+    agent.state.messages = historyWindow.releaseCommittedHistory(allMessages);
+    const checkpoint=historyWindow.checkpoint();
+    if (checkpoint && committedRevision && !cached.recoveryIndexDisabled) {
+      try {
+        cached.recoveryIndex = await advanceConversationIndex({root:projectRoot,sessionId,sessionKind,identity:cached.recoveryIdentity,
+          model,canReadArchives:cached.canReadArchives,revision:committedRevision,checkpoint},cached.recoveryIndex,currentRevision);
+        // Legacy layouts may require canonical full recovery. Do not rescan
+        // their complete prefix on every successful turn.
+        cached.recoveryIndexDisabled = !cached.recoveryIndex;
+      } catch (error) {
+        // The request is already committed. An optional derived index must
+        // not turn a successful request into a failed one.
+        cached.recoveryIndex=undefined;
+        cached.recoveryIndexDisabled=true;
+        process.emitWarning("Cannot advance transcript recovery index: "+String(error));
+      }
+    }
+  }
   const resultMessages = config.historyScope !== "window" && compactedHistoryCount > 0
     ? [...await restoreAgentMessagesFromTranscript(projectRoot, sessionId, sessionKind),
         ...(errorMessage ? allMessages.slice(requestMessageStart) : [])]

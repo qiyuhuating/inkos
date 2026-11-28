@@ -383,7 +383,10 @@ export async function restoreAgentMessagesFromTranscript(
   sessionId: string,
   sessionKind?: SessionKind,
 ): Promise<AgentMessage[]> {
-  const events = await readTranscriptEvents(projectRoot, sessionId);
+  return restoreAgentMessagesFromEvents(await readTranscriptEvents(projectRoot,sessionId),sessionKind);
+}
+
+export function restoreAgentMessagesFromEvents(events: TranscriptEvent[], sessionKind?: SessionKind): AgentMessage[] {
   const committed = committedMessageEvents(events, sessionKind);
   const requestKinds = new Map(
     events

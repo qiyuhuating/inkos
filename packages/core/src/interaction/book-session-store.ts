@@ -246,6 +246,8 @@ export async function deleteBookSession(
   await new ToolResultArchive(projectRoot, sessionId).remove();
   const { removeConversationCheckpoint } = await import("../harness/conversation-checkpoint.js");
   await removeConversationCheckpoint(projectRoot, sessionId);
+  const { removeTranscriptIndexes } = await import("./transcript-index.js");
+  await removeTranscriptIndexes(projectRoot, sessionId);
 }
 
 export async function bindBookSessionToBook(

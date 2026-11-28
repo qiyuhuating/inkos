@@ -264,6 +264,8 @@ export {
   appendTranscriptEvent,
   sessionsDir,
   readTranscriptEvents,
+  readTranscriptPage,
+  type TranscriptPageCursor,
   confirmedRequestInstruction,
   nextTranscriptSeq,
   transcriptPath,

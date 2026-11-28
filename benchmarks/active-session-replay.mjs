@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { performance } from "node:perf_hooks";
 
 const sessionId="active-session-replay";
@@ -13,15 +16,34 @@ const bodyText="证据：完整正文与记录。".repeat(4000);
 const promptText="核验已有记录，保留证据与进度。".repeat(90);
 
 async function worker(root,baseUrl,start,count,historyScope="window") {
+  const {transcriptIndexPath}=await import("../packages/core/dist/interaction/transcript-index.js");
+  const target=join(root,".inkos","sessions",sessionId+".jsonl");
+  let initialIndex;
+  try{initialIndex=JSON.parse(await fsp.readFile(transcriptIndexPath(root,sessionId,"window"),"utf8"));}catch(error){if(error.code!=="ENOENT")throw error;}
+  const hasCheckpoint=await fsp.readdir(join(root,".inkos","conversation-checkpoints")).then(files=>files.length>0,error=>{if(error.code==="ENOENT")return false;throw error;});
+  const reads={full:0,ranges:[]};
+  const originalReadFile=fsp.readFile,originalStream=fs.createReadStream;
+  fsp.readFile=function(path,...args){if(String(path)===target)reads.full++;return originalReadFile(path,...args);};
+  fs.createReadStream=function(path,options){if(String(path)===target)reads.ranges.push({start:options?.start??0,end:options?.end??null});return originalStream(path,options);};
+  syncBuiltinESMExports();
   const {runAgentSession,evictAgentCache}=await import("../packages/core/dist/agent/agent-session.js");
   const {readTranscriptEvents}=await import("../packages/core/dist/interaction/session-transcript.js");
   const model={id:"fixture-model",name:"fixture-model",api:"openai-completions",provider:"openai",
     baseUrl,reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:16000,maxTokens:1024};
   const samples=[],began=performance.now();
+  let recoveryTrace;
   for(let turn=start;turn<start+count;turn++){
     const result=await runAgentSession({projectRoot:root,sessionId,bookId:null,workId:null,
       profileId:"workspace-default",sessionKind:"chat",language:"zh",model,apiKey:"fixture",stream:false,...(historyScope==="window"?{historyScope}:{}),pipeline:{}},
       "Turn "+turn+": Read evidence.txt. "+promptText);
+    if(turn===start){
+      recoveryTrace={fullReads:reads.full,ranges:reads.ranges.slice(),initialPrefixOffset:initialIndex?.byteOffset??0};
+      if(start>1&&hasCheckpoint&&historyScope==="window"){
+        assert.ok(initialIndex?.byteOffset>0,"Missing certified recovery index");
+        assert.equal(recoveryTrace.fullReads,0,"Indexed Agent materialized the full log");
+        assert.ok(recoveryTrace.ranges.length>0&&recoveryTrace.ranges.every(range=>range.start>=initialIndex.byteOffset),"Indexed Agent scanned the compacted prefix");
+      }
+    }
     assert.equal(result.responseText,"Fixture read completed.", JSON.stringify({turn,error:result.errorMessage,responseText:result.responseText,last:result.messages?.slice(-2).map(m=>({role:m.role,stopReason:m.stopReason,errorMessage:m.errorMessage,content:m.role==="assistant"?m.content:undefined}))}));
     if(turn===start||turn===start+count-1||turn%10===0){
       global.gc?.();
@@ -45,7 +67,10 @@ async function worker(root,baseUrl,start,count,historyScope="window") {
   const checkpointFiles=await readdir(join(root,".inkos","conversation-checkpoints"));
   assert.equal(checkpointFiles.length,1);
   const archiveFiles=await readdir(join(root,".inkos","tool-results",(await import("node:crypto")).createHash("sha256").update(sessionId).digest("hex")));
-  const output={turns:count,commits:start+count-1,elapsedMs:performance.now()-began,peakRssMiB:process.resourceUsage().maxRSS/1024,samples,diskMessages,archiveFiles:archiveFiles.length};
+  const finalIndex=JSON.parse(await fsp.readFile(transcriptIndexPath(root,sessionId,"window"),"utf8"));
+  const logBytes=(await fsp.stat(target)).size;
+  assert.ok(finalIndex.byteOffset>0&&finalIndex.byteOffset<=logBytes);
+  const output={turns:count,commits:start+count-1,elapsedMs:performance.now()-began,peakRssMiB:process.resourceUsage().maxRSS/1024,samples,diskMessages,archiveFiles:archiveFiles.length,recoveryTrace,logBytes,prefixOffset:finalIndex.byteOffset};
   evictAgentCache(sessionId);
   console.log(JSON.stringify(output));
 }
